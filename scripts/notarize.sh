@@ -13,7 +13,7 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
-for var in VERGELABS_DEVELOPER_ID APPLE_ID VERGELABS_TEAM_ID; do
+for var in HEARTHCMD_NOTARY_DEVELOPER_ID HEARTHCMD_NOTARY_APPLE_ID VERGELABS_TEAM_ID; do
   if [[ -z "${!var:-}" ]]; then
     echo "Error: $var is not set" >&2
     exit 1
@@ -23,11 +23,11 @@ done
 read -rs -p "App-specific password (notarytool): " NOTARYTOOL_APP_PASSWORD
 echo
 
-if codesign -dvv "$BINARY" 2>&1 | grep -q "Authority=$VERGELABS_DEVELOPER_ID"; then
+if codesign -dvv "$BINARY" 2>&1 | grep -q "Authority=$HEARTHCMD_NOTARY_DEVELOPER_ID"; then
   echo "Skipping signing (already signed): $BINARY"
 else
   echo "Signing $BINARY ..."
-  codesign --force --sign "$VERGELABS_DEVELOPER_ID" --options runtime --timestamp \
+  codesign --force --sign "$HEARTHCMD_NOTARY_DEVELOPER_ID" --options runtime --timestamp \
     -i "com.vergelabs.hearthcmd" "$BINARY"
 fi
 
@@ -44,11 +44,11 @@ rm -rf "$staging_dir"
 
 echo "Submitting $dmg_path for notarization ..."
 xcrun notarytool submit "$dmg_path" \
-  --apple-id "$APPLE_ID" --team-id "$VERGELABS_TEAM_ID" --password "$NOTARYTOOL_APP_PASSWORD"
+  --apple-id "$HEARTHCMD_NOTARY_APPLE_ID" --team-id "$VERGELABS_TEAM_ID" --password "$NOTARYTOOL_APP_PASSWORD"
 
 echo ""
 echo "Submitted. Check status with:"
-echo "  xcrun notarytool info <submission-id> --apple-id \"\$APPLE_ID\" --team-id \"\$VERGELABS_TEAM_ID\" --password \"\$NOTARYTOOL_APP_PASSWORD\""
+echo "  xcrun notarytool info <submission-id> --apple-id \"\$HEARTHCMD_NOTARY_APPLE_ID\" --team-id \"\$VERGELABS_TEAM_ID\" --password \"\$NOTARYTOOL_APP_PASSWORD\""
 echo ""
 echo "Once accepted, staple with:"
 echo "  xcrun stapler staple $dmg_path"
