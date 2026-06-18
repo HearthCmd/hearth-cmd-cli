@@ -1,0 +1,13 @@
+/greenlight*
+/dist/
+/release-notes.md
+/CLAUDE.md
+.DS_Store
+/dump-hook.sh
+/.gemini
+/.claude
+/logs
+
+# Plugin test binaries — built by TestMain go-build dance.
+/testdata/plugins/echo/hearth-plugin-echo
+/testdata/plugins/crashy/hearth-plugin-crashy

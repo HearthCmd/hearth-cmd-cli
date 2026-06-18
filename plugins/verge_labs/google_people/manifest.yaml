@@ -1,0 +1,137 @@
+plugin_slug: verge_labs/google_people
+namespace: verge_labs
+author: Verge Labs
+display_name: Google People (Service Account)
+auth_scheme: service_account
+description: |
+  Look up people in a Google Workspace organization via the People API v1.
+  Returns names, email addresses, phone numbers, job titles, and departments.
+  Read-only.
+
+  AUTH: Requires a Google Cloud service account with domain-wide delegation
+  enabled in Google Workspace Admin. Not suitable for personal Google accounts
+  or per-user access. For individual user access, use the
+  verge_labs/google_people_oauth plugin instead.
+version: 0.1.0
+manifest_schema: 2
+
+config_schema:
+  type: object
+  required: [impersonated_email]
+  properties:
+    impersonated_email:
+      type: string
+      description: |
+        The Google Workspace user this connection acts as (e.g.
+        flogg@vergelabs.org). Any valid Workspace user works — the
+        directory is org-wide regardless of which user is impersonated.
+        The service account must have domain-wide delegation granted for
+        the directory.readonly scope.
+
+credentials:
+  - name: service_account_key
+    type: service_account_json
+    secret: true
+    scopes:
+      - https://www.googleapis.com/auth/directory.readonly
+    impersonation_config_ref: impersonated_email
+    description: |
+      Google Cloud service account JSON key with domain-wide delegation
+      for the People API directory scope.
+    wizard_guide: |
+      1. Reuse the same service account JSON key as google_drive or
+         google_calendar — no new key needed.
+      2. In Google Workspace Admin → Security → API controls →
+         Domain-wide delegation, add this scope to the SA's entry:
+           https://www.googleapis.com/auth/directory.readonly
+      3. Set impersonated_email to any Workspace user (e.g. flogg@vergelabs.org).
+      4. Paste the full contents of the JSON key file below, or pick the
+         existing secret if you already stored it for another plugin.
+    wizard_link: https://console.cloud.google.com/iam-admin/serviceaccounts
+    wizard_link_label: Open Service Accounts in Cloud Console
+
+verbs:
+  - name: search_people
+    description: |
+      Search the Workspace directory for people matching a name or email
+      fragment. Required args: query (e.g. "Alice", "eng@", "smith").
+      Returns up to 30 matches with displayName, emailAddresses,
+      phoneNumbers, organizations (title, department), and resourceName
+      (needed for get_person).
+    grant_categories: [read]
+    args:
+      query:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/people:searchDirectoryPeople?query={{args.query}}&readMask=names,emailAddresses,phoneNumbers,organizations,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=30"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_people
+    description: |
+      Page through the full Workspace directory. Returns up to 100 people
+      per call with displayName, emailAddresses, phoneNumbers, and
+      organizations. Use search_people for targeted lookups; use this
+      only when you need to enumerate the directory.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses,phoneNumbers,organizations&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_person
+    description: |
+      Fetch full profile details for a specific person by their resource
+      name (e.g. "people/c12345678" from a search_people result).
+      Required args: resource_name. Returns names, emailAddresses,
+      phoneNumbers, organizations, biographies, and photos.
+    grant_categories: [read]
+    args:
+      resource_name:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/{{args.resource_name}}?personFields=names,emailAddresses,phoneNumbers,organizations,biographies,photos"
+      headers:
+        Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    List up to 100 people from the Workspace directory. Used to scope
+    IAM rules to specific directory entries.
+  http:
+    method: GET
+    url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+    headers:
+      Authorization: "Bearer {{credentials.service_account_key.access_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: "$.people[*]"
+    entity_id: "$.resourceName"
+    kind:
+      literal: gpeople.person
+    labels:
+      name: "$.names[0].displayName"
+      email: "$.emailAddresses[0].value"
+
+default_rules:
+  - action: external_resource.verge_labs/google_people.search_people
+    decision: allow
+  - action: external_resource.verge_labs/google_people.list_people
+    decision: allow
+  - action: external_resource.verge_labs/google_people.get_person
+    decision: allow

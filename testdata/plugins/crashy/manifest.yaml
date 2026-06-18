@@ -1,0 +1,13 @@
+plugin_slug: crashy
+display_name: Always-Crashing Test Plugin
+version: 0.0.1
+manifest_schema: 1
+description: |
+  Plugin whose Init handler immediately exits non-zero. Used to
+  drive the supervisor's backoff-cap test — repeated launch attempts
+  must honor exponential backoff and not hot-loop.
+executable: ./hearth-plugin-crashy
+verbs:
+  - name: noop
+    description: Never reached — Init exits first.
+    output: text

@@ -1,0 +1,465 @@
+plugin_slug: verge_labs/github
+namespace: verge_labs
+author: Verge Labs
+display_name: GitHub
+description: |
+  Read and write GitHub issues, pull requests, files, and commits via the
+  GitHub REST API. One connection = one primary owner/repo. For multiple
+  repos create multiple connections backed by the same plugin type.
+version: 0.1.0
+manifest_schema: 2
+
+config_schema:
+  type: object
+  required: [github_api_url, github_owner, github_repo]
+  properties:
+    github_api_url:
+      type: string
+      description: |
+        GitHub API base URL. Use https://api.github.com for github.com.
+        For GitHub Enterprise: https://<host>/api/v3
+    github_owner:
+      type: string
+      description: Repository owner — a GitHub user login or organization name.
+    github_repo:
+      type: string
+      description: Repository name (without owner prefix).
+
+credentials:
+  - name: github_token
+    description: |
+      Personal access token (classic or fine-grained). Fine-grained tokens
+      should have Contents, Issues, and Pull Requests read/write permissions
+      scoped to the target repository.
+    secret: true
+    wizard_guide: |
+      Create a fine-grained personal access token scoped to the target
+      repository. Under "Repository permissions" grant:
+        - Contents: Read-only
+        - Issues: Read and write
+        - Pull requests: Read and write
+    wizard_link: https://github.com/settings/personal-access-tokens/new
+    wizard_link_label: Create token on GitHub
+
+verbs:
+  - name: get_repo
+    description: Fetch metadata for the configured repository (description, topics, default branch, etc.)
+    grant_categories: [read, repository]
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: list_issues
+    description: |
+      List open issues for the configured repository. Optional args: state
+      (open/closed/all, default open), labels (comma-separated), per_page
+      (max 100, default 30).
+    grant_categories: [read, issues]
+    args:
+      state:
+        type: string
+        required: false
+      labels:
+        type: string
+        required: false
+      per_page:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: get_issue
+    description: Fetch a single issue by number, including its body and labels.
+    grant_categories: [read, issues]
+    args:
+      number:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues/{{args.number}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: list_pull_requests
+    description: |
+      List pull requests. Optional args: state (open/closed/all, default open),
+      base (target branch filter), per_page (max 100, default 30).
+    grant_categories: [read, pull_requests]
+    args:
+      state:
+        type: string
+        required: false
+      base:
+        type: string
+        required: false
+      per_page:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/pulls"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: get_pull_request
+    description: Fetch a single pull request by number, including its diff URL and review state.
+    grant_categories: [read, pull_requests]
+    args:
+      number:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/pulls/{{args.number}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: get_file
+    description: |
+      Fetch the contents of a file in the repository. Returns base64-encoded
+      content plus metadata. Optional arg: ref (branch/tag/commit SHA,
+      defaults to the repo's default branch).
+    grant_categories: [read, files]
+    args:
+      path:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/contents/{{args.path}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: list_commits
+    description: |
+      List commits on a branch. Optional args: sha (branch/tag/commit to
+      start from), path (only commits touching this path), per_page
+      (max 100, default 30).
+    grant_categories: [read, commits]
+    args:
+      sha:
+        type: string
+        required: false
+      path:
+        type: string
+        required: false
+      per_page:
+        type: integer
+        required: false
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/commits"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: search_issues
+    description: |
+      Search issues and pull requests across GitHub using a query string.
+      The query is passed directly to GitHub's search API (same syntax as
+      the github.com search bar). Results are sorted by best match.
+      Example: "is:issue is:open label:bug"
+    grant_categories: [read, issues]
+    args:
+      query:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "{{config.github_api_url}}/search/issues?q={{args.query}}+repo:{{config.github_owner}}/{{config.github_repo}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+      response:
+        success_status: [200]
+
+  - name: create_issue
+    description: |
+      Open a new issue. Required args: title, body. To add labels after
+      creation use update_issue with a patch arg.
+    grant_categories: [write, issues]
+    args:
+      title:
+        type: string
+        required: true
+      body:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: |
+        {"title": "{{args.title}}", "body": "{{args.body}}"}
+      response:
+        success_status: [201]
+
+  - name: update_issue
+    description: |
+      Update fields of an existing issue. Required args: number, patch.
+      patch is a raw JSON object containing only the fields to change.
+      Examples:
+        Change title:   --arg patch='{"title":"New title"}'
+        Replace labels: --arg patch='{"labels":["bug","help wanted"]}'
+        Edit body:      --arg patch='{"body":"Updated description"}'
+        Multiple:       --arg patch='{"title":"Done","labels":["done"]}'
+      Prefer close_issue / open_issue for state-only changes.
+    grant_categories: [write, issues]
+    args:
+      number:
+        type: integer
+        required: true
+      patch:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues/{{args.number}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: "{{args.patch}}"
+      response:
+        success_status: [200]
+
+  - name: close_issue
+    description: |
+      Close an open issue by number. Sets state to "closed".
+      Use open_issue to reopen. Use add_issue_comment before closing
+      to leave a note explaining why.
+    grant_categories: [write, issues]
+    args:
+      number:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues/{{args.number}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: '{"state": "closed"}'
+      response:
+        success_status: [200]
+
+  - name: open_issue
+    description: |
+      Reopen a closed issue by number. Sets state to "open".
+    grant_categories: [write, issues]
+    args:
+      number:
+        type: integer
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues/{{args.number}}"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: '{"state": "open"}'
+      response:
+        success_status: [200]
+
+  - name: add_issue_comment
+    description: Post a comment on an issue or pull request by number.
+    grant_categories: [write, issues]
+    args:
+      number:
+        type: integer
+        required: true
+      body:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/issues/{{args.number}}/comments"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: |
+        {"body": "{{args.body}}"}
+      response:
+        success_status: [201]
+
+  - name: create_pull_request
+    description: |
+      Open a new pull request. Required args: title, head (branch with
+      changes), base (target branch), body (description). To open as a
+      draft, pass a patch after creation via the GitHub web UI or API;
+      draft mode cannot be toggled via this verb.
+    grant_categories: [write, pull_requests]
+    args:
+      title:
+        type: string
+        required: true
+      head:
+        type: string
+        required: true
+      base:
+        type: string
+        required: true
+      body:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/pulls"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: |
+        {"title": "{{args.title}}", "head": "{{args.head}}", "base": "{{args.base}}", "body": "{{args.body}}"}
+      response:
+        success_status: [201]
+
+  - name: add_pr_review_comment
+    description: |
+      Submit a review on a pull request. Required args: number (PR number),
+      body (review summary), event (APPROVE / REQUEST_CHANGES / COMMENT).
+      Use COMMENT for general feedback, APPROVE to signal ready-to-merge,
+      REQUEST_CHANGES to block merge until addressed.
+    grant_categories: [write, pull_requests]
+    args:
+      number:
+        type: integer
+        required: true
+      body:
+        type: string
+        required: true
+      event:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}/pulls/{{args.number}}/reviews"
+      headers:
+        Authorization: "Bearer {{credentials.github_token}}"
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+        Content-Type: application/json
+      body: |
+        {"body": "{{args.body}}", "event": "{{args.event}}"}
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    Enumerate the configured repository as a single entity. Used to
+    scope IAM rules to this connection's repo.
+  http:
+    method: GET
+    url: "{{config.github_api_url}}/repos/{{config.github_owner}}/{{config.github_repo}}"
+    headers:
+      Authorization: "Bearer {{credentials.github_token}}"
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response:
+      success_status: [200]
+  extract:
+    iterate: $
+    entity_id: $.full_name
+    kind:
+      literal: github.repo
+    labels:
+      owner: $.owner.login
+      repo: $.name
+      visibility: $.visibility
+      default_branch: $.default_branch
+
+default_rules:
+  - action: external_resource.verge_labs/github.get_repo
+    decision: allow
+  - action: external_resource.verge_labs/github.list_issues
+    decision: allow
+  - action: external_resource.verge_labs/github.get_issue
+    decision: allow
+  - action: external_resource.verge_labs/github.list_pull_requests
+    decision: allow
+  - action: external_resource.verge_labs/github.get_pull_request
+    decision: allow
+  - action: external_resource.verge_labs/github.get_file
+    decision: allow
+  - action: external_resource.verge_labs/github.list_commits
+    decision: allow
+  - action: external_resource.verge_labs/github.search_issues
+    decision: allow
+  - action: external_resource.verge_labs/github.create_issue
+    decision: ask
+  - action: external_resource.verge_labs/github.update_issue
+    decision: ask
+  - action: external_resource.verge_labs/github.add_issue_comment
+    decision: ask
+  - action: external_resource.verge_labs/github.create_pull_request
+    decision: ask
+  - action: external_resource.verge_labs/github.close_issue
+    decision: ask
+  - action: external_resource.verge_labs/github.open_issue
+    decision: ask
+  - action: external_resource.verge_labs/github.add_pr_review_comment
+    decision: ask

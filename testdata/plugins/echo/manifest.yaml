@@ -1,0 +1,58 @@
+plugin_slug: echo
+display_name: Echo Test Plugin
+version: 0.0.1
+manifest_schema: 1
+description: |
+  Test plugin for the resource-plugin supervisor. Implements verbs
+  that exercise the happy path, plugin-reported error, crash, and
+  stderr-forwarding code paths.
+executable: ./hearth-plugin-echo
+credentials:
+  # 1d dogfooding: exercises both the secrets-vault path (echo_token,
+  # encrypted to the daemon's pubkey + stored server-side) and the
+  # plain-config path (echo_endpoint, stays cleartext in yaml).
+  - name: echo_token
+    secret: true
+  - name: echo_endpoint
+    secret: false
+verbs:
+  - name: echo
+    description: Round-trip args back as the stdout result.
+    args:
+      payload:
+        type: string
+        required: false
+    output: json
+  - name: fail
+    description: Return a structured error (code=internal).
+    output: json
+  - name: exit
+    description: Crash the plugin process (os.Exit(1)) without responding.
+    output: json
+  - name: log_stderr
+    description: Write a marker line to stderr, then echo.
+    output: json
+  - name: whoami
+    description: Reflect the connection id the plugin received at Init time.
+    output: json
+  - name: echo_secrets
+    description: Reflect the per-invoke SecretBindings map back as JSON. Dogfooding aid for the consumption pipeline — the daemon's scrubber should mask cleartext values as *** in the output stream.
+    output: json
+default_rules:
+  # Dogfooding-friendly defaults: every echo verb is auto-allowed.
+  # Real plugins (HA, gdrive) will declare ask or deny for
+  # sensitive verbs; echo's verbs are all side-effect-free
+  # (echo round-trips, fail returns an error, exit crashes its own
+  # subprocess, log_stderr emits one line) so allow-all is fine.
+  - action: external_resource.echo.echo
+    decision: allow
+  - action: external_resource.echo.fail
+    decision: allow
+  - action: external_resource.echo.exit
+    decision: allow
+  - action: external_resource.echo.log_stderr
+    decision: allow
+  - action: external_resource.echo.whoami
+    decision: allow
+  - action: external_resource.echo.echo_secrets
+    decision: allow

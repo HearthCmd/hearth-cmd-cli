@@ -1,0 +1,211 @@
+plugin_slug: verge_labs/home_assistant
+namespace: verge_labs
+author: Verge Labs
+display_name: Home Assistant
+description: |
+  Control Home Assistant entities from agents. The daemon templates HTTP
+  calls in-process — no subprocess plugin is spawned for this plugin.
+  Configure with your HA instance URL and a long-lived access token.
+version: 0.1.0
+manifest_schema: 2
+
+config_schema:
+  type: object
+  required: [ha_url]
+  properties:
+    ha_url:
+      type: string
+      description: |
+        Base URL of your Home Assistant instance, including scheme and
+        port. Example: http://homeassistant.local:8123
+
+credentials:
+  - name: ha_token
+    description: |
+      Long-lived access token. In Home Assistant, go to your profile →
+      Security → Long-Lived Access Tokens.
+    secret: true
+
+verbs:
+  - name: get_state
+    description: Read the current state and attributes of a Home Assistant entity.
+    grant_categories: [read]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "{{config.ha_url}}/api/states/{{args.entity_id}}"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_entities
+    description: |
+      Return every entity Home Assistant currently exposes, with state
+      and attributes. Useful for ad-hoc inspection; the daemon also
+      runs this call automatically to populate the entity snapshot
+      that IAM rules predicate on.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "{{config.ha_url}}/api/states"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+      response:
+        success_status: [200]
+
+  - name: turn_on
+    description: |
+      Turn on a Home Assistant entity. Works for lights, switches,
+      input booleans, fans, media players, and any other domain whose
+      service interface uses the `turn_on` verb. The domain is
+      inferred from entity_id's prefix (e.g. light.kitchen → light).
+    grant_categories: [write, control]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/{{domain(args.entity_id)}}/turn_on"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: turn_off
+    description: |
+      Turn off a Home Assistant entity. Mirror of turn_on; domain
+      inferred from entity_id's prefix.
+    grant_categories: [write, control]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/{{domain(args.entity_id)}}/turn_off"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: set_scene
+    description: |
+      Activate a Home Assistant scene by its entity_id. Scenes are
+      pre-defined groupings of entity states ("Movie Mode", "Good
+      Night"); activating one applies all the included states. Safe
+      to use freely — scenes are an explicit setup the user already
+      curated.
+    grant_categories: [write, scenes]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/scene/turn_on"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: lock
+    description: |
+      Lock a smart lock. Higher-stakes than light controls; default
+      rule routes through Ask so the user is prompted on every
+      call until they edit the rule to widen.
+    grant_categories: [write, locks]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/lock/lock"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+  - name: unlock
+    description: |
+      Unlock a smart lock. Ask by default — unlocking is the
+      classic "you really sure?" affordance and we err on prompting.
+    grant_categories: [write, locks]
+    args:
+      entity_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "{{config.ha_url}}/api/services/lock/unlock"
+      headers:
+        Authorization: "Bearer {{credentials.ha_token}}"
+        Content-Type: application/json
+      body: |
+        {"entity_id": "{{args.entity_id}}"}
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    Enumerate Home Assistant entities for IAM evaluation. Run on first
+    invoke and on explicit refresh.
+  http:
+    method: GET
+    url: "{{config.ha_url}}/api/states"
+    headers:
+      Authorization: "Bearer {{credentials.ha_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: $[*]
+    entity_id: $.entity_id
+    kind:
+      prefix_with_entity_domain: "ha."
+    labels:
+      friendly_name: $.attributes.friendly_name
+      area: $.attributes.area_id
+
+default_rules:
+  - action: external_resource.verge_labs/home_assistant.get_state
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant.list_entities
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant.turn_on
+    decision: allow
+    when:
+      entity_kind: ha.light
+  - action: external_resource.verge_labs/home_assistant.turn_off
+    decision: allow
+    when:
+      entity_kind: ha.light
+  - action: external_resource.verge_labs/home_assistant.set_scene
+    decision: allow
+  - action: external_resource.verge_labs/home_assistant.lock
+    decision: ask
+  - action: external_resource.verge_labs/home_assistant.unlock
+    decision: ask

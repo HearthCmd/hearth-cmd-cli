@@ -1,0 +1,14 @@
+plugin_slug: gdrive
+display_name: Google Drive
+version: 0.1.0
+manifest_schema: 1
+description: Test fixture — minimal Google Drive manifest.
+executable: ./hearth-plugin-gdrive
+verbs:
+  - name: read
+    description: Read a file by id.
+    args:
+      file_id:
+        type: string
+        required: true
+    output: text
