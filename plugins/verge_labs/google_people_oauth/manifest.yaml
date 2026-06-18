@@ -1,0 +1,112 @@
+plugin_slug: verge_labs/google_people_oauth
+namespace: verge_labs
+author: Verge Labs
+display_name: Google People
+auth_scheme: oauth2_user
+description: |
+  Look up contacts and people via the Google People API v1.
+  Returns names, email addresses, phone numbers, job titles, and departments.
+  Read-only.
+
+  AUTH: Connects as a specific Google user via OAuth. Returns the connected
+  user's personal contacts and, for Workspace accounts, the org directory.
+  For domain-wide directory access without per-user auth, use
+  verge_labs/google_people (service account) instead.
+version: 0.1.0
+manifest_schema: 2
+
+credentials:
+  - name: user_token
+    type: oauth2_google
+    secret: true
+    scopes:
+      - https://www.googleapis.com/auth/contacts.readonly
+    description: |
+      Your Google account, connected via OAuth. Hearth will request
+      read-only access to your contacts.
+
+verbs:
+  - name: search_people
+    description: |
+      Search the user's contacts and Workspace directory for people
+      matching a name or email fragment. Required args: query (e.g.
+      "Alice", "eng@", "smith"). Returns up to 30 matches with
+      displayName, emailAddresses, phoneNumbers, organizations (title,
+      department), and resourceName (needed for get_person).
+    grant_categories: [read]
+    args:
+      query:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/people:searchDirectoryPeople?query={{args.query}}&readMask=names,emailAddresses,phoneNumbers,organizations,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=30"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_people
+    description: |
+      Page through the Workspace directory. Returns up to 100 people per
+      call with displayName, emailAddresses, phoneNumbers, and
+      organizations. Use search_people for targeted lookups; use this
+      only when you need to enumerate the directory.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses,phoneNumbers,organizations&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_person
+    description: |
+      Fetch full profile details for a specific person by their resource
+      name (e.g. "people/c12345678" from a search_people result).
+      Required args: resource_name. Returns names, emailAddresses,
+      phoneNumbers, organizations, biographies, and photos.
+    grant_categories: [read]
+    args:
+      resource_name:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://people.googleapis.com/v1/{{args.resource_name}}?personFields=names,emailAddresses,phoneNumbers,organizations,biographies,photos"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    List up to 100 people from the directory. Used to scope IAM rules
+    to specific directory entries.
+  http:
+    method: GET
+    url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+    headers:
+      Authorization: "Bearer {{credentials.user_token.access_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: "$.people[*]"
+    entity_id: "$.resourceName"
+    kind:
+      literal: gpeople.person
+    labels:
+      name: "$.names[0].displayName"
+      email: "$.emailAddresses[0].value"
+
+default_rules:
+  - action: external_resource.verge_labs/google_people_oauth.search_people
+    decision: allow
+  - action: external_resource.verge_labs/google_people_oauth.list_people
+    decision: allow
+  - action: external_resource.verge_labs/google_people_oauth.get_person
+    decision: allow

@@ -1,0 +1,168 @@
+//go:build darwin || linux
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"nhooyr.io/websocket"
+)
+
+// talkWS owns the /ws connection that the talk TUI reads from. Incoming
+// messages are pushed into the running tea.Program as typed tea.Msg values.
+type talkWS struct {
+	url     string
+	conn    *websocket.Conn
+	program *tea.Program
+	ctx     context.Context
+	cancel  context.CancelFunc
+}
+
+// Tea messages produced by the WS goroutine.
+type wsConnectedMsg struct{}
+type wsDisconnectedMsg struct{ err string }
+type wsReconnectingMsg struct{ after time.Duration }
+type wsMessageMsg struct{ data []byte }
+
+func newTalkWS(ioDeviceID, secret string) (*talkWS, error) {
+	if wsURL == "" {
+		return nil, fmt.Errorf("no relay server URL configured")
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil {
+		return nil, fmt.Errorf("bad relay URL: %w", err)
+	}
+	// Build-time wsURL points at /ws/daemon (legacy /ws/relay path is rewritten
+	// by the daemon at dial time). The TUI uses the phone-equivalent /ws
+	// endpoint and authenticates as its host's terminal io_device —
+	// /hosts/register allocates the io_device_id + secret at enrollment.
+	u.Path = "/ws"
+	q := u.Query()
+	q.Set("io_device_id", ioDeviceID)
+	q.Set("secret", secret)
+	addClientQuery(q)
+	u.RawQuery = q.Encode()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	return &talkWS{
+		url:    u.String(),
+		ctx:    ctx,
+		cancel: cancel,
+	}, nil
+}
+
+// run is the long-lived WS pump. It dials the server, forwards every text
+// frame to the tea.Program as a wsMessageMsg, and on any disconnect waits
+// with exponential backoff (capped at 30s) before reconnecting. Stops only
+// when close() cancels the context.
+func (w *talkWS) run() {
+	var backoff time.Duration
+	for w.ctx.Err() == nil {
+		err := w.connectAndRead()
+		if w.ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			w.program.Send(wsDisconnectedMsg{err: err.Error()})
+		}
+		backoff = nextBackoff(backoff)
+		w.program.Send(wsReconnectingMsg{after: backoff})
+		select {
+		case <-time.After(backoff):
+		case <-w.ctx.Done():
+			return
+		}
+	}
+}
+
+// connectAndRead dials once and pumps frames until the connection drops or
+// the model context is canceled. Returns the read/dial error (or nil on a
+// clean context cancellation).
+func (w *talkWS) connectAndRead() error {
+	debugLogf("ws-dial url=%s", redactSecretInURL(w.url))
+	dialCtx, dialCancel := context.WithTimeout(w.ctx, 10*time.Second)
+	conn, _, err := websocket.Dial(dialCtx, w.url, nil)
+	dialCancel()
+	if err != nil {
+		debugLogf("ws-dial-error err=%v", err)
+		if dialErrorIs426(err) {
+			printOutdatedAndExit(outdatedBody{YourVersion: clientVersionValue()})
+		}
+		if dialErrorIs403(err) {
+			// Stale io_device credentials. No amount of backoff fixes
+			// this. Drop the alt screen, print a clean message, and
+			// exit so the user knows to re-login rather than staring
+			// at an empty agent list.
+			printAuthBrokenAndExit()
+		}
+		return err
+	}
+	debugLogf("ws-connected")
+	w.conn = conn
+	conn.SetReadLimit(1 << 20) // match the server's 1 MB cap
+	w.program.Send(wsConnectedMsg{})
+
+	defer func() {
+		conn.Close(websocket.StatusNormalClosure, "")
+		w.conn = nil
+	}()
+
+	for {
+		_, data, err := conn.Read(w.ctx)
+		if err != nil {
+			if w.ctx.Err() != nil {
+				return nil
+			}
+			debugLogf("ws-read-error err=%v", err)
+			return err
+		}
+		w.program.Send(wsMessageMsg{data: data})
+	}
+}
+
+// redactSecretInURL strips the secret query param from a URL for logging.
+// Leaves io_device_id + the rest of the path visible for diagnosis.
+func redactSecretInURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	if q.Get("secret") != "" {
+		q.Set("secret", "<redacted>")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// nextBackoff returns the next reconnect delay, doubling up to a 30s cap.
+func nextBackoff(current time.Duration) time.Duration {
+	if current == 0 {
+		return time.Second
+	}
+	next := current * 2
+	if next > 30*time.Second {
+		return 30 * time.Second
+	}
+	return next
+}
+
+// send writes a JSON text frame back to the server. Used in phase 2+ for
+// permission_response and relay_input. Currently unused.
+func (w *talkWS) send(data []byte) error {
+	if w.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+	return w.conn.Write(w.ctx, websocket.MessageText, data)
+}
+
+func (w *talkWS) close() {
+	w.cancel()
+	if w.conn != nil {
+		w.conn.Close(websocket.StatusNormalClosure, "")
+	}
+}

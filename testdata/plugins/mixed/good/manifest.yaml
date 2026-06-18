@@ -1,0 +1,9 @@
+plugin_slug: good
+display_name: Good Plugin
+version: 0.1.0
+manifest_schema: 1
+executable: ./hearth-plugin-good
+verbs:
+  - name: ping
+    description: Test verb.
+    output: text

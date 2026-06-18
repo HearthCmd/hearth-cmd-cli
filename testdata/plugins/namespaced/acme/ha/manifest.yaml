@@ -1,0 +1,10 @@
+plugin_slug: acme/ha
+display_name: Home Assistant (Acme fork)
+version: 0.1.0
+manifest_schema: 1
+description: Test fixture — namespaced HA manifest under acme/.
+executable: ./hearth-plugin-ha
+verbs:
+  - name: turn_on
+    description: Turn on a light, switch, or scene.
+    output: json

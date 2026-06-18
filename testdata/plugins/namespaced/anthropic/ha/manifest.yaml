@@ -1,0 +1,10 @@
+plugin_slug: anthropic/ha
+display_name: Home Assistant (Anthropic)
+version: 0.1.0
+manifest_schema: 1
+description: Test fixture — second namespaced HA manifest under anthropic/.
+executable: ./hearth-plugin-ha
+verbs:
+  - name: turn_on
+    description: Turn on a light, switch, or scene.
+    output: json

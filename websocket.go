@@ -1,0 +1,549 @@
+//go:build darwin || linux
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log"
+	"math/rand"
+	"net/http"
+	"sync"
+	"time"
+
+	"nhooyr.io/websocket"
+)
+
+// WSMode controls the directionality of the WebSocket connection.
+type WSMode int
+
+const (
+	WSModeRW WSMode = iota // read input from server, write output to server (default)
+	WSModeR                // read input from server only
+	WSModeW                // write output to server only
+)
+
+// textQueueSize is the max number of text messages buffered during disconnection.
+const textQueueSize = 1024
+
+// WSClient connects to a remote WebSocket server and injects received
+// messages into the PTY via the provided inject function. When connected,
+// it also sends PTY output back to the server.
+type WSClient struct {
+	// url and token are mutable via UpdateAuth (used by the daemon's
+	// reload_credentials IPC, to swap auth on the live connection
+	// without rebuilding agent-instance registrations). Snapshot
+	// under authMu before each dial.
+	authMu sync.RWMutex
+	url    string
+	token  string
+
+	mode        WSMode
+	inject      func([]byte) error
+	killFunc    func()
+	controlFunc    func([]byte) // optional handler for binary control messages
+	textFrameFunc  func([]byte) bool // optional handler for unrouted text frames; returns true if consumed
+	reconnectFunc  func() // called after reconnecting (not on first connect)
+
+	done chan struct{}
+	wg   sync.WaitGroup
+
+	// Connection for sending output. Protected by connMu.
+	connMu sync.Mutex
+	conn   *websocket.Conn
+
+	// Buffered text messages (transcript data) that failed to send.
+	// Protected by textMu. Messages are queued when conn is nil or
+	// a write fails, and drained on reconnection.
+	textMu    sync.Mutex
+	textQueue [][]byte
+
+	// Pending permission requests waiting for server responses.
+	// Maps client-generated request_id → response channel.
+	pendingMu sync.Mutex
+	pending   map[string]chan []byte
+}
+
+// NewWSClient creates a new WebSocket client. Call Run to start connecting.
+func NewWSClient(url, token string, mode WSMode, inject func([]byte) error) *WSClient {
+	return &WSClient{
+		url:    url,
+		token:  token,
+		mode:   mode,
+		inject: inject,
+		done:   make(chan struct{}),
+	}
+}
+
+// Run connects to the WebSocket server and reads messages in a loop.
+// On disconnect, it reconnects with exponential backoff.
+// Blocks until Close is called.
+func (c *WSClient) Run() {
+	c.wg.Add(1)
+	defer c.wg.Done()
+
+	var attempt int
+	firstConnect := true
+	for {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+
+		connStart := time.Now()
+		err := c.connectAndRead(firstConnect)
+		firstConnect = false
+		if err == nil {
+			// Clean shutdown via Close()
+			return
+		}
+
+		// Reset backoff if the connection lasted more than 60s,
+		// so transient failures after a long session start fresh.
+		if time.Since(connStart) > 60*time.Second {
+			attempt = 0
+		}
+
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+
+		delay := backoff(attempt)
+		log.Printf("ws: disconnected (%v), reconnecting in %v", err, delay)
+		attempt++
+
+		select {
+		case <-time.After(delay):
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// Send writes PTY output to the remote server as a binary frame. Safe to call
+// from any goroutine. Silently drops data if not connected or if mode is read-only.
+// The write happens asynchronously so the caller (PTY output relay) is never
+// blocked by slow or broken WebSocket connections.
+func (c *WSClient) Send(data []byte) {
+	if c.mode == WSModeR {
+		return
+	}
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+
+	if conn == nil {
+		return
+	}
+
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := conn.Write(ctx, websocket.MessageBinary, cp); err != nil {
+			log.Printf("ws: binary write error: %v", err)
+		}
+	}()
+}
+
+// SendText writes a text frame to the remote server. Used for JSON messages
+// (e.g. transcript data). Safe to call from any goroutine. If the connection
+// is down or the write fails, the message is queued for retry on reconnection.
+func (c *WSClient) SendText(data []byte) {
+	if c.mode == WSModeR {
+		return
+	}
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+
+	if conn == nil {
+		log.Printf("ws: SendText queued (no connection), %d bytes", len(data))
+		c.enqueueText(data)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+		log.Printf("ws: text write error: %v", err)
+		c.enqueueText(data)
+	}
+}
+
+// enqueueText adds a text message to the retry queue. If the queue is full,
+// the oldest message is dropped.
+func (c *WSClient) enqueueText(data []byte) {
+	cp := make([]byte, len(data))
+	copy(cp, data)
+
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+
+	if len(c.textQueue) >= textQueueSize {
+		// Drop the oldest message to make room.
+		log.Printf("ws: text queue full (%d), dropping oldest message", textQueueSize)
+		c.textQueue = c.textQueue[1:]
+	}
+	c.textQueue = append(c.textQueue, cp)
+}
+
+// stampRetry injects `"retry":true` into the outer JSON envelope so the
+// server can suppress side effects (e.g. mention push fan-out) on resends
+// from the offline queue. The original send already had its chance to fire
+// those; if it landed, repeating them spams the user. If it didn't land,
+// we accept the lost notification — better than the alternative.
+//
+// Caller must own the bytes (we return a fresh slice on success). On any
+// parse failure we return msg unchanged: the WS frame still goes through,
+// and the worst case is we re-fire the side effect — same as today.
+func stampRetry(msg []byte) []byte {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg, &fields); err != nil {
+		return msg
+	}
+	fields["retry"] = json.RawMessage(`true`)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return msg
+	}
+	return out
+}
+
+// drainTextQueue sends all queued text messages over the connection.
+// Called after a new connection is established.
+func (c *WSClient) drainTextQueue(conn *websocket.Conn) {
+	c.textMu.Lock()
+	queue := c.textQueue
+	c.textQueue = nil
+	c.textMu.Unlock()
+
+	if len(queue) == 0 {
+		return
+	}
+
+	log.Printf("ws: draining %d queued text messages", len(queue))
+	for i, msg := range queue {
+		stamped := stampRetry(msg)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := conn.Write(ctx, websocket.MessageText, stamped)
+		cancel()
+		if err != nil {
+			log.Printf("ws: drain write error: %v", err)
+			// Re-queue unsent messages (from index i onward).
+			unsent := queue[i:]
+			c.textMu.Lock()
+			// Prepend unsent to any messages that arrived while draining.
+			c.textQueue = append(unsent, c.textQueue...)
+			if len(c.textQueue) > textQueueSize {
+				c.textQueue = c.textQueue[:textQueueSize]
+			}
+			c.textMu.Unlock()
+			return
+		}
+	}
+}
+
+// RegisterPending creates a channel for receiving a permission response
+// for the given client-generated request ID.
+func (c *WSClient) RegisterPending(requestID string) <-chan []byte {
+	ch := make(chan []byte, 1)
+	c.pendingMu.Lock()
+	if c.pending == nil {
+		c.pending = make(map[string]chan []byte)
+	}
+	c.pending[requestID] = ch
+	c.pendingMu.Unlock()
+	return ch
+}
+
+// RemovePending removes a pending request channel (idempotent).
+func (c *WSClient) RemovePending(requestID string) {
+	c.pendingMu.Lock()
+	delete(c.pending, requestID)
+	c.pendingMu.Unlock()
+}
+
+// routePermissionResponse checks if a frame is a permission_response
+// and routes it to the pending channel. Returns true if handled.
+func (c *WSClient) routePermissionResponse(data []byte) bool {
+	// Quick check before parsing JSON
+	if len(data) < 20 || data[0] != '{' {
+		return false
+	}
+	var msg struct {
+		Type              string `json:"type"`
+		RequestID         string `json:"request_id"`
+		AIAgentInstanceID string `json:"ai_agent_instance_id"`
+		CorrelationID     string `json:"correlation_id"`
+	}
+	if json.Unmarshal(data, &msg) != nil {
+		return false
+	}
+
+	// Route ws_request responses back to the waiting handler by correlation_id.
+	if msg.CorrelationID != "" {
+		c.pendingMu.Lock()
+		ch, ok := c.pending[msg.CorrelationID]
+		if ok {
+			delete(c.pending, msg.CorrelationID)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			ch <- data
+			return true
+		}
+	}
+
+	// Route agent_instance_connected ack by ai_agent_instance_id
+	if msg.Type == "agent_instance_connected" && msg.AIAgentInstanceID != "" {
+		key := "agent_instance_connect:" + msg.AIAgentInstanceID
+		c.pendingMu.Lock()
+		ch, ok := c.pending[key]
+		if ok {
+			delete(c.pending, key)
+		}
+		c.pendingMu.Unlock()
+		if ok {
+			ch <- data
+		}
+		return true
+	}
+
+	// Route retire_agent_instance control messages through the control handler
+	if msg.Type == "retire_agent_instance" {
+		if c.controlFunc != nil {
+			c.controlFunc(data)
+		}
+		return true
+	}
+
+	if msg.Type != "permission_response" {
+		return false
+	}
+	if msg.RequestID == "" {
+		log.Printf("ws: permission_response with empty request_id: %s", string(data))
+	}
+	c.pendingMu.Lock()
+	ch, ok := c.pending[msg.RequestID]
+	if ok {
+		delete(c.pending, msg.RequestID)
+	}
+	pendingCount := len(c.pending)
+	c.pendingMu.Unlock()
+	log.Printf("ws: permission_response for %s (matched=%v, pending=%d)", msg.RequestID, ok, pendingCount)
+	if ok {
+		ch <- data
+	}
+	return true
+}
+
+// IsConnected returns true if the WebSocket connection is currently active.
+func (c *WSClient) IsConnected() bool {
+	c.connMu.Lock()
+	connected := c.conn != nil
+	c.connMu.Unlock()
+	return connected
+}
+
+// Close signals the client to stop and waits for it to exit.
+func (c *WSClient) Close() {
+	close(c.done)
+	c.wg.Wait()
+}
+
+// UpdateAuth swaps the dial URL + bearer token on the live client and
+// force-closes the current connection so the reconnect loop in Run
+// picks up the new values on its next dial. Used by the daemon's
+// reload_credentials IPC after `hearth login` writes fresh creds — the
+// agent-instance registrations on the surrounding DaemonWS are
+// preserved across the swap.
+func (c *WSClient) UpdateAuth(url, token string) {
+	c.authMu.Lock()
+	c.url = url
+	c.token = token
+	c.authMu.Unlock()
+
+	c.connMu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.connMu.Unlock()
+	if conn != nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "credentials reloaded")
+	}
+}
+
+func (c *WSClient) authSnapshot() (string, string) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+	return c.url, c.token
+}
+
+func (c *WSClient) setConn(conn *websocket.Conn) {
+	c.connMu.Lock()
+	c.conn = conn
+	c.connMu.Unlock()
+}
+
+func (c *WSClient) connectAndRead(firstConnect bool) error {
+	// Create a context that cancels when Close() is called,
+	// so conn.Read unblocks immediately on shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-c.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	defer cancel()
+
+	// Snapshot auth before dial — UpdateAuth may have rewritten url+token
+	// since the prior iteration.
+	dialURL, token := c.authSnapshot()
+
+	// Build dial options with optional auth header
+	opts := &websocket.DialOptions{}
+	if token != "" {
+		opts.HTTPHeader = http.Header{
+			"Authorization": []string{"Bearer " + token},
+		}
+	}
+
+	dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer dialCancel()
+
+	conn, _, err := websocket.Dial(dialCtx, dialURL, opts)
+	if err == nil {
+		// nhooyr defaults to a 32 KiB read limit which is well under
+		// what real server payloads need (plugin install reports,
+		// resource_connections lists, agent_resource_grants fetches
+		// have all grown past that as the schema expanded). Match
+		// the server's daemon-WS 8 MB cap so neither side disconnects
+		// with a 1009 "message too big" on a normal exchange.
+		conn.SetReadLimit(8 << 20)
+	}
+	if err != nil {
+		// Server returned 426 Upgrade Required — daemon is below the
+		// version policy's `min`. Surface a clear "run hearth update"
+		// message and exit. See client_header.go.
+		if dialErrorIs426(err) {
+			printOutdatedAndExit(outdatedBody{YourVersion: clientVersionValue()})
+		}
+		return err
+	}
+	defer func() {
+		c.setConn(nil)
+		conn.CloseNow()
+	}()
+
+	c.setConn(conn)
+	log.Printf("ws: connected to %s", dialURL)
+
+	// Drain any text messages that were queued during disconnection.
+	c.drainTextQueue(conn)
+
+	// On reconnect, notify the owner so it can re-register state (e.g. sessions).
+	// Run in a goroutine so the read loop below can process ack responses.
+	if !firstConnect && c.reconnectFunc != nil {
+		go c.reconnectFunc()
+	}
+
+	// Read loop: text frames are relay input (PTY injection),
+	// binary frames are control messages from the server.
+	for {
+		msgType, data, err := conn.Read(ctx)
+		if err != nil {
+			// If we're shutting down, report clean exit
+			select {
+			case <-c.done:
+				conn.Close(websocket.StatusNormalClosure, "shutting down")
+				return nil
+			default:
+			}
+			return err
+		}
+
+		// Check for permission response frames before PTY injection.
+		// Try both text and binary — server may use either frame type.
+		if c.routePermissionResponse(data) {
+			continue
+		}
+
+		// Binary frames are control messages
+		if msgType == websocket.MessageBinary && len(data) > 0 {
+			var msg struct{ Type string `json:"type"` }
+			if json.Unmarshal(data, &msg) == nil {
+				switch msg.Type {
+				case "kill":
+					log.Printf("ws: received kill command")
+					if c.killFunc != nil {
+						c.killFunc()
+					}
+					return nil
+				default:
+					if c.controlFunc != nil {
+						c.controlFunc(data)
+					}
+				}
+			}
+			continue
+		}
+
+		// Let the text frame handler try first (used by daemon WS to
+		// route input to the correct agent instance by ai_agent_instance_id).
+		if c.textFrameFunc != nil && c.textFrameFunc(data) {
+			continue
+		}
+
+		if len(data) > 0 && c.mode != WSModeW && c.inject != nil {
+			// In raw mode, Enter is \r (0x0D), not \n (0x0A).
+			data = bytes.ReplaceAll(data, []byte{'\n'}, []byte{'\r'})
+
+			// Strip any trailing \r — we'll send it separately below.
+			text := bytes.TrimRight(data, "\r")
+			needsSubmit := len(text) < len(data) || len(text) > 0
+
+			// Inject the text content first.
+			if len(text) > 0 {
+				if err := c.inject(text); err != nil {
+					log.Printf("ws: inject error: %v", err)
+				}
+			}
+
+			// Then send \r separately after a brief delay, simulating
+			// the user pressing Enter. Sending it in one write with the
+			// text can cause TUI apps to treat it as a paste.
+			if needsSubmit {
+				time.Sleep(50 * time.Millisecond)
+				if err := c.inject([]byte{'\r'}); err != nil {
+					log.Printf("ws: inject error: %v", err)
+				}
+			}
+		}
+	}
+}
+
+// backoff returns a duration for the given attempt number.
+// Exponential: 1s, 2s, 4s, 8s, 16s, 30s (capped) with ±25% jitter.
+func backoff(attempt int) time.Duration {
+	const maxDelay = 30 * time.Second
+	if attempt > 30 {
+		attempt = 30 // prevent integer overflow in shift
+	}
+	base := time.Second * time.Duration(1<<uint(attempt))
+	if base > maxDelay {
+		base = maxDelay
+	}
+	// Add jitter: ±25%
+	jitter := time.Duration(float64(base) * (0.5*rand.Float64() - 0.25))
+	return base + jitter
+}

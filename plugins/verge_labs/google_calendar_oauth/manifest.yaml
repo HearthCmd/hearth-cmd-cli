@@ -1,0 +1,285 @@
+plugin_slug: verge_labs/google_calendar_oauth
+namespace: verge_labs
+author: Verge Labs
+display_name: Google Calendar
+auth_scheme: oauth2_user
+description: |
+  Create and manage Google Calendar events via the Calendar REST API v3.
+
+  AUTH: Connects as a specific Google user via OAuth. Each team member
+  or agent can authenticate with their own Google account. No service
+  account or domain-wide delegation required — works with personal
+  Google accounts and Google Workspace.
+
+  For Workspace-wide access acting as any user, use
+  verge_labs/google_calendar (service account) instead.
+version: 0.1.0
+manifest_schema: 2
+
+credentials:
+  - name: user_token
+    type: oauth2_google
+    secret: true
+    scopes:
+      - https://www.googleapis.com/auth/calendar.events
+      - https://www.googleapis.com/auth/calendar.readonly
+    description: |
+      Your Google account, connected via OAuth. Hearth will request
+      access to read and write calendar events on your behalf.
+
+verbs:
+  # ── Read-only ──────────────────────────────────────────────────────
+
+  - name: list_calendars
+    description: |
+      List all calendars the connected user has access to. Returns
+      id, summary (name), description, timeZone, accessRole for each.
+      Use this to find a calendar_id for other verbs. Pass "primary" to
+      other verbs to target the user's main calendar.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=100"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_events
+    description: |
+      List events in a calendar within a time window. Required args:
+      calendar_id (pass "primary" for main calendar), time_min, time_max
+      (RFC3339 with timezone offset, e.g. 2024-06-01T00:00:00-07:00).
+      Returns id, summary, start, end, attendees, status, htmlLink.
+    grant_categories: [read]
+    args:
+      calendar_id:
+        type: string
+        required: true
+      time_min:
+        type: string
+        required: true
+      time_max:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/calendar/v3/calendars/{{args.calendar_id}}/events?timeMin={{args.time_min}}&timeMax={{args.time_max}}&maxResults=50&singleEvents=true&orderBy=startTime&fields=items(id,summary,description,start,end,attendees,status,htmlLink,organizer)"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_event
+    description: |
+      Fetch full details of a single calendar event. Required args:
+      calendar_id (pass "primary" for main calendar), event_id.
+      Returns all fields including attendees, conferenceData, recurrence.
+    grant_categories: [read]
+    args:
+      calendar_id:
+        type: string
+        required: true
+      event_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/calendar/v3/calendars/{{args.calendar_id}}/events/{{args.event_id}}"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: check_availability
+    description: |
+      Query free/busy status for one or more people over a time window.
+      Required args: time_min, time_max (RFC3339 with timezone offset),
+      items_json (JSON array of calendar IDs to check, typically email
+      addresses, e.g. [{"id":"alice@example.com"},{"id":"bob@example.com"}]).
+      Returns busy time blocks per person. Always call this before
+      create_event to confirm the proposed time is free for all attendees.
+    grant_categories: [read]
+    args:
+      time_min:
+        type: string
+        required: true
+      time_max:
+        type: string
+        required: true
+      items_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/calendar/v3/freeBusy"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"timeMin": "{{args.time_min}}", "timeMax": "{{args.time_max}}", "items": {{args.items_json}}}
+      response:
+        success_status: [200]
+
+  # ── Write ──────────────────────────────────────────────────────────
+
+  - name: create_event
+    description: |
+      Create a calendar event and send email invites to all attendees.
+      Required args: calendar_id (pass "primary"), summary (title),
+      start_datetime, end_datetime (RFC3339 with timezone offset, e.g.
+      2024-06-15T14:00:00-07:00), timezone (IANA name, e.g.
+      America/Los_Angeles), attendees_json (JSON array of attendee objects,
+      e.g. [{"email":"alice@example.com"},{"email":"bob@example.com"}]).
+      Optional args: description, location. Sends email invites to all
+      attendees. Always call check_availability first.
+    grant_categories: [write]
+    args:
+      calendar_id:
+        type: string
+        required: true
+      summary:
+        type: string
+        required: true
+      start_datetime:
+        type: string
+        required: true
+      end_datetime:
+        type: string
+        required: true
+      timezone:
+        type: string
+        required: true
+      attendees_json:
+        type: string
+        required: true
+      description:
+        type: string
+        required: true
+      location:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/calendar/v3/calendars/{{args.calendar_id}}/events?sendUpdates=all&fields=id,summary,start,end,attendees,htmlLink,status"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"summary": "{{args.summary}}", "description": "{{args.description}}", "location": "{{args.location}}", "start": {"dateTime": "{{args.start_datetime}}", "timeZone": "{{args.timezone}}"}, "end": {"dateTime": "{{args.end_datetime}}", "timeZone": "{{args.timezone}}"}, "attendees": {{args.attendees_json}}, "reminders": {"useDefault": true}}
+      response:
+        success_status: [200]
+
+  - name: update_event
+    description: |
+      Update an existing event and notify attendees. Required args:
+      calendar_id (pass "primary"), event_id, summary, description,
+      location, start_datetime, end_datetime, timezone, attendees_json.
+      Call get_event first to read the current values, then supply all
+      fields with your changes merged in — the API replaces whatever you
+      send, so omitting a field (or sending empty) would clear it.
+      attendees_json replaces the full attendee list; include everyone
+      who should remain invited.
+    grant_categories: [write]
+    args:
+      calendar_id:
+        type: string
+        required: true
+      event_id:
+        type: string
+        required: true
+      summary:
+        type: string
+        required: true
+      description:
+        type: string
+        required: true
+      location:
+        type: string
+        required: true
+      start_datetime:
+        type: string
+        required: true
+      end_datetime:
+        type: string
+        required: true
+      timezone:
+        type: string
+        required: true
+      attendees_json:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "https://www.googleapis.com/calendar/v3/calendars/{{args.calendar_id}}/events/{{args.event_id}}?sendUpdates=all&fields=id,summary,start,end,attendees,htmlLink,status"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"summary": "{{args.summary}}", "description": "{{args.description}}", "location": "{{args.location}}", "start": {"dateTime": "{{args.start_datetime}}", "timeZone": "{{args.timezone}}"}, "end": {"dateTime": "{{args.end_datetime}}", "timeZone": "{{args.timezone}}"}, "attendees": {{args.attendees_json}}}
+      response:
+        success_status: [200]
+
+  - name: cancel_event
+    description: |
+      Cancel an event and send cancellation emails to all attendees.
+      Required args: calendar_id (pass "primary"), event_id. This
+      permanently deletes the event. Cannot be undone.
+    grant_categories: [write, destructive]
+    args:
+      calendar_id:
+        type: string
+        required: true
+      event_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: DELETE
+      url: "https://www.googleapis.com/calendar/v3/calendars/{{args.calendar_id}}/events/{{args.event_id}}?sendUpdates=all"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [204]
+
+snapshot:
+  description: |
+    List up to 100 upcoming events from the connected user's primary
+    calendar. Used to scope IAM rules to specific events.
+  http:
+    method: GET
+    url: "https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=100&singleEvents=true&fields=items(id,summary,start)"
+    headers:
+      Authorization: "Bearer {{credentials.user_token.access_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: "$.items[*]"
+    entity_id: "$.id"
+    kind:
+      literal: gcal.event
+    labels:
+      name: "$.summary"
+      start: "$.start.dateTime"
+
+default_rules:
+  - action: external_resource.verge_labs/google_calendar_oauth.list_calendars
+    decision: allow
+  - action: external_resource.verge_labs/google_calendar_oauth.list_events
+    decision: allow
+  - action: external_resource.verge_labs/google_calendar_oauth.get_event
+    decision: allow
+  - action: external_resource.verge_labs/google_calendar_oauth.check_availability
+    decision: allow
+  - action: external_resource.verge_labs/google_calendar_oauth.create_event
+    decision: ask
+  - action: external_resource.verge_labs/google_calendar_oauth.update_event
+    decision: ask
+  - action: external_resource.verge_labs/google_calendar_oauth.cancel_event
+    decision: ask

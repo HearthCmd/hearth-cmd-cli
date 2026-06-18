@@ -1,0 +1,380 @@
+plugin_slug: verge_labs/google_drive_oauth
+namespace: verge_labs
+author: Verge Labs
+display_name: Google Drive
+auth_scheme: oauth2_user
+description: |
+  Read and write files in Google Drive via the Drive REST API v3.
+
+  AUTH: Connects as a specific Google user via OAuth. Works with personal
+  Google accounts and Google Workspace. Access is limited to files Hearth
+  creates or that the user explicitly opens through Hearth (drive.file scope).
+
+  For Workspace-wide access acting as any user, use
+  verge_labs/google_drive (service account) instead.
+version: 0.1.0
+manifest_schema: 2
+
+credentials:
+  - name: user_token
+    type: oauth2_google
+    secret: true
+    scopes:
+      - https://www.googleapis.com/auth/drive.file
+    description: |
+      Your Google account, connected via OAuth. Hearth will request access
+      to files it creates or that you explicitly open through Hearth.
+
+verbs:
+  # ── Read-only ──────────────────────────────────────────────────────
+
+  - name: list_files
+    description: |
+      List up to 50 non-trashed files and folders visible to the connected
+      user (most recently modified first). Returns file id, name, mimeType,
+      modifiedTime, size, parents. For filtered results use search_files;
+      for the contents of a specific folder use list_folder_contents.
+    grant_categories: [read]
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files?q=trashed=false&orderBy=modifiedTime+desc&pageSize=50&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: list_folder_contents
+    description: |
+      List the direct children of a folder. Required args: folder_id
+      (the Drive file ID of the folder, or "root" for My Drive root).
+      Returns id, name, mimeType, modifiedTime, size.
+    grant_categories: [read]
+    args:
+      folder_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files?q=%27{{args.folder_id}}%27+in+parents+and+trashed%3Dfalse&orderBy=name&pageSize=100&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: get_file_metadata
+    description: |
+      Fetch metadata for a file or folder by its Drive file ID.
+      Returns id, name, mimeType, modifiedTime, size, parents, webViewLink.
+    grant_categories: [read]
+    args:
+      file_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}?fields=id,name,mimeType,modifiedTime,size,parents,webViewLink,trashed&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: download_file
+    description: |
+      Download the raw content of a file by its Drive file ID. Use for
+      plain text, Markdown, code, CSV, PDF, and other non-Google-native
+      files. For Google Docs / Sheets / Slides use export_file instead.
+    grant_categories: [read]
+    args:
+      file_id:
+        type: string
+        required: true
+    output: text
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}?alt=media&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: export_file
+    description: |
+      Export a Google Workspace file (Doc, Sheet, Slide, etc.) to a
+      standard MIME type. Required args: file_id, mime_type. Common
+      export targets: text/plain, text/csv, application/pdf,
+      application/vnd.openxmlformats-officedocument.wordprocessingml.document.
+    grant_categories: [read]
+    args:
+      file_id:
+        type: string
+        required: true
+      mime_type:
+        type: string
+        required: true
+    output: text
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/export?mimeType={{args.mime_type}}&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  - name: search_files
+    description: |
+      Search across Drive using a Drive query string (up to 50 results).
+      The query follows Google's Drive query syntax:
+        https://developers.google.com/drive/api/guides/search-files
+      Examples:
+        name contains 'budget'
+        mimeType = 'text/plain'
+        'folder_id' in parents and name contains 'report'
+        fullText contains 'quarterly revenue'
+    grant_categories: [read]
+    args:
+      query:
+        type: string
+        required: true
+    output: json
+    http:
+      method: GET
+      url: "https://www.googleapis.com/drive/v3/files?q={{args.query}}&pageSize=50&fields=files(id,name,mimeType,modifiedTime,size,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+      response:
+        success_status: [200]
+
+  # ── Write ──────────────────────────────────────────────────────────
+
+  - name: create_file
+    description: |
+      Create a new file with metadata only (no initial content). Returns
+      the new file's id and webViewLink. To set content immediately,
+      follow with upload_file_content. Required args: name, mime_type,
+      parent_id (Drive folder ID to create in; pass "root" for My Drive
+      root).
+    grant_categories: [write]
+    args:
+      name:
+        type: string
+        required: true
+      mime_type:
+        type: string
+        required: true
+      parent_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"name": "{{args.name}}", "mimeType": "{{args.mime_type}}", "parents": ["{{args.parent_id}}"]}
+      response:
+        success_status: [200]
+
+  - name: upload_file_content
+    description: |
+      Replace the content of an existing file with new text content.
+      Required args: file_id, content (the new text content), mime_type
+      (content type, e.g. text/plain or text/markdown).
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      content:
+        type: string
+        required: true
+      mime_type:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "https://www.googleapis.com/upload/drive/v3/files/{{args.file_id}}?uploadType=media&fields=id,name,modifiedTime&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: "{{args.mime_type}}"
+      body: "{{args.content}}"
+      response:
+        success_status: [200]
+
+  - name: rename_file
+    description: "Rename a file or folder. Required args: file_id, name (new name)."
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      name:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}?fields=id,name&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"name": "{{args.name}}"}
+      response:
+        success_status: [200]
+
+  - name: move_file
+    description: |
+      Move a file or folder to a different parent folder. Required args:
+      file_id, new_parent_id, old_parent_id (obtain via get_file_metadata
+      → parents[0]).
+    grant_categories: [write]
+    args:
+      file_id:
+        type: string
+        required: true
+      new_parent_id:
+        type: string
+        required: true
+      old_parent_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}?addParents={{args.new_parent_id}}&removeParents={{args.old_parent_id}}&fields=id,name,parents&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: "{}"
+      response:
+        success_status: [200]
+
+  - name: create_folder
+    description: |
+      Create a new folder. Required args: name, parent_id (pass "root"
+      for My Drive root). Returns the new folder's id and webViewLink.
+    grant_categories: [write]
+    args:
+      name:
+        type: string
+        required: true
+      parent_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files?fields=id,name,webViewLink&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"name": "{{args.name}}", "mimeType": "application/vnd.google-apps.folder", "parents": ["{{args.parent_id}}"]}
+      response:
+        success_status: [200]
+
+  - name: trash_file
+    description: |
+      Move a file or folder to the trash. Required args: file_id.
+      The item can be restored from the Drive trash.
+    grant_categories: [write, destructive]
+    args:
+      file_id:
+        type: string
+        required: true
+    output: json
+    http:
+      method: PATCH
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}?fields=id,name,trashed&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"trashed": true}
+      response:
+        success_status: [200]
+
+  - name: share_file
+    description: |
+      Grant access to a file or folder. Required args: file_id, role
+      (reader / commenter / writer), type (user / group / domain / anyone),
+      email_address (user or group email; empty string when type=anyone).
+    grant_categories: [write, sharing]
+    args:
+      file_id:
+        type: string
+        required: true
+      role:
+        type: string
+        required: true
+      type:
+        type: string
+        required: true
+      email_address:
+        type: string
+        required: true
+    output: json
+    http:
+      method: POST
+      url: "https://www.googleapis.com/drive/v3/files/{{args.file_id}}/permissions?fields=id,role,type,emailAddress&supportsAllDrives=true"
+      headers:
+        Authorization: "Bearer {{credentials.user_token.access_token}}"
+        Content-Type: application/json
+      body: |
+        {"role": "{{args.role}}", "type": "{{args.type}}", "emailAddress": "{{args.email_address}}"}
+      response:
+        success_status: [200]
+
+snapshot:
+  description: |
+    List up to 50 non-trashed files visible to the connected user.
+    Used to scope IAM rules to specific Drive items.
+  http:
+    method: GET
+    url: "https://www.googleapis.com/drive/v3/files?q=trashed=false&pageSize=50&fields=files(id,name,mimeType,parents)&supportsAllDrives=true&includeItemsFromAllDrives=true"
+    headers:
+      Authorization: "Bearer {{credentials.user_token.access_token}}"
+    response:
+      success_status: [200]
+  extract:
+    iterate: "$.files[*]"
+    entity_id: "$.id"
+    kind:
+      literal: gdrive.item
+    labels:
+      name: "$.name"
+      mime_type: "$.mimeType"
+
+default_rules:
+  - action: external_resource.verge_labs/google_drive_oauth.list_files
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.list_folder_contents
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.get_file_metadata
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.download_file
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.export_file
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.search_files
+    decision: allow
+  - action: external_resource.verge_labs/google_drive_oauth.create_file
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.upload_file_content
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.rename_file
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.move_file
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.create_folder
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.trash_file
+    decision: ask
+  - action: external_resource.verge_labs/google_drive_oauth.share_file
+    decision: ask
