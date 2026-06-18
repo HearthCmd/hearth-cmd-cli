@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="HearthCmd/hearth-cmd-cli"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="hearth"
 
 # --- Detect OS and architecture ---
@@ -78,11 +78,11 @@ if [ ! -s "${tmpdir}/${BINARY_NAME}" ]; then
 fi
 
 # --- Install ---
+mkdir -p "$INSTALL_DIR"
 echo "Installing to ${INSTALL_DIR}/${BINARY_NAME}..."
-if [ -w "$INSTALL_DIR" ]; then
-  mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-else
-  sudo mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
-fi
+mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
 
+echo ""
 echo "Done. Run 'hearth' to get started."
+echo "Make sure ${INSTALL_DIR} is on your PATH:"
+echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
