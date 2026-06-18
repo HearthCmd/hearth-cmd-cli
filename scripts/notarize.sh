@@ -13,12 +13,15 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
-for var in VERGELABS_DEVELOPER_ID APPLE_ID VERGELABS_TEAM_ID NOTARYTOOL_APP_PASSWORD; do
+for var in VERGELABS_DEVELOPER_ID APPLE_ID VERGELABS_TEAM_ID; do
   if [[ -z "${!var:-}" ]]; then
     echo "Error: $var is not set" >&2
     exit 1
   fi
 done
+
+read -rs -p "App-specific password (notarytool): " NOTARYTOOL_APP_PASSWORD
+echo
 
 if codesign -dvv "$BINARY" 2>&1 | grep -q "Authority=$VERGELABS_DEVELOPER_ID"; then
   echo "Skipping signing (already signed): $BINARY"
