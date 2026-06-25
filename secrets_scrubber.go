@@ -16,16 +16,12 @@ import (
 // guarantee — plugin authors are still responsible for not echoing
 // credentials. But a single bug in a plugin's logging shouldn't
 // dump a token into the agent's terminal or the daemon's log.
-//
-// Primitives lifted verbatim from greenlight-cli/run.go
-// (encodingsOf, dedupeForms, scrub). Eight encoding forms cover
-// what's practically observed: plaintext, hex (both cases), base64
-// (std + url, padded + unpadded), and URL-encoded. If a plugin
-// SHA-256s a credential and prints the digest, we won't catch it —
-// document as a known limit.
+// Eight encoding forms cover what's practically observed: plaintext,
+// hex (both cases), base64 (std + url, padded + unpadded), and
+// URL-encoded. SHA-256 digests of credentials are not caught —
+// documented as a known limit.
 
-// encodingsOf returns deduplicated byte forms of a secret used by
-// scrub. Lifted verbatim from greenlight-cli.
+// encodingsOf returns deduplicated byte forms of a secret used by scrub.
 func encodingsOf(secret []byte) [][]byte {
 	formsSet := map[string]struct{}{
 		string(secret):                               {},
@@ -96,13 +92,10 @@ func scrubBytes(src []byte, forms [][]byte) []byte {
 	return src
 }
 
-// scrubReader is the streaming variant lifted from greenlight-cli.
-// Not used by the current plugin_process.go paths (stderr is
-// line-bufio'd and Invoke results are single-shot), but kept
-// because (a) it's a verbatim port we don't want to lose, and
-// (b) future streaming-output verbs will need it. The carry-buffer
-// pattern prevents a form straddling two reads from slipping
-// through.
+// scrubReader is the streaming variant of scrub. Not used by current
+// plugin_process.go paths (stderr is line-bufio'd and Invoke results
+// are single-shot), but kept for future streaming-output verbs.
+// The carry-buffer pattern prevents a form straddling two reads.
 func scrubReader(src io.Reader, dst io.Writer, forms [][]byte) error {
 	if len(forms) == 0 {
 		_, err := io.Copy(dst, src)

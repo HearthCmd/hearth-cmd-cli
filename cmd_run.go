@@ -16,24 +16,19 @@ import (
 	"time"
 )
 
-// runRun is the entry point for `hearth run`. Mirrors greenlight-cli's
-// `greenlight run` UX: parses --secret flags, asks the daemon to
-// resolve each binding to cleartext (IAM-gated by the server-side
-// Authorize chokepoint), execs the named command with the cleartexts
-// injected as env vars, and streams stdout/stderr through a scrubber
-// that masks every encoded form of every cleartext with `***`.
+// runRun is the entry point for `hearth run`. Parses --secret flags,
+// asks the daemon to resolve each binding to cleartext (IAM-gated by
+// the server-side Authorize chokepoint), execs the named command with
+// the cleartexts injected as env vars, and streams stdout/stderr through
+// a scrubber that masks every encoded form of every cleartext with `***`.
 //
 // Usage: hearth run [--secret ENV=<secret-id>]... [--] <cmd> [args...]
 //
 // Cleartext flows: daemon RAM → unix socket → wrapper RAM → child
-// process env. Never enters the agent's transcript because the
-// wrapper scrubs its own stdout/stderr before piping back to the
-// caller's terminal.
-//
-// Architecture note: differs from greenlight in WHERE decryption
-// happens. Greenlight is operator-local (CLI has the private key);
-// hearth's daemon is the per-host holder of the secrets keypair, so
-// the CLI asks the daemon to do the resolve. Same end-state.
+// process env. Never enters the agent's transcript because the wrapper
+// scrubs its own stdout/stderr before piping back to the caller's terminal.
+// Decryption happens in the daemon (per-host secrets keypair holder),
+// not in the CLI.
 func runRun(args []string) {
 	if len(args) == 0 {
 		printRunUsage()
@@ -83,18 +78,17 @@ rest:
 		os.Exit(1)
 	}
 
-	// Resolve secrets via daemon BEFORE forking the child. Refusing
-	// partial-injection (any decrypt failure aborts) matches greenlight's
-	// "footgun avoidance" — better to fail fast than to run with some
-	// env vars missing and let the child fail in a confusing way.
+	// Resolve secrets via daemon BEFORE forking the child. Any decrypt
+	// failure aborts entirely — better to fail fast than run with some
+	// env vars missing.
 	cleartexts, perr := resolveSecretsViaDaemon(bindings)
 	if perr != nil {
 		exitForPluginErrorCode(string(perr.Code), perr.Message)
 	}
 	defer zeroSecretMap(cleartexts)
 
-	// Refuse cleartexts < 8 bytes — scrubbing a 2-char value would
-	// false-positive-redact normal output (greenlight's same rule).
+	// Refuse cleartexts < 8 bytes — scrubbing a short value would
+	// false-positive-redact normal output.
 	for env, v := range cleartexts {
 		if len(v) < 8 {
 			fmt.Fprintf(os.Stderr, "hearth run: secret %q is too short to safely scrub (need >= 8 bytes)\n", env)

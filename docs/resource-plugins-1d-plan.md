@@ -8,7 +8,7 @@
 
 **Goal of 1d:** plugin credentials stop living in plaintext on the
 daemon host. They get stored encrypted on the server via the
-greenlight-pattern X25519 + ChaCha20Poly1305 envelope, decrypted only
+hearth X25519 + ChaCha20Poly1305 envelope, decrypted only
 inside the plugin's owning daemon process, and passed to the plugin
 via Init params. Plugin stdout/stderr is scrubbed for credential
 echoes as a backstop.
@@ -28,9 +28,9 @@ echoes as a backstop.
 - Out-of-band pubkey verification (QR / fingerprint). The phone +
   daemon trust the server's claim about host pubkeys. Same trust
   model as everything else; flag for hardening pre-launch.
-- Key rotation UX. Greenlight's "rotate refuses if secrets exist
-  unless confirm-wipe" pattern carries over verbatim, but the UX
-  to drive it lives later.
+- Key rotation UX. "Rotate refuses if secrets exist unless
+  confirm-wipe" carries over verbatim, but the UX to drive it lives
+  later.
 
 ## 1. Architecture summary
 
@@ -206,17 +206,15 @@ scoping discussion — only `'connection'` writes are accepted in 1d
 
 ## 4. Daemon-side changes (hearth-cmd-cli)
 
-### Crypto primitives (port from greenlight-cli)
+### Crypto primitives
 
-New `secrets_crypto.go` lifts these verbatim from
-`greenlight-cli/crypto.go`:
+`secrets_crypto.go` implements:
 - `generateKeypair() (*ecdh.PrivateKey, error)`
 - `encryptSecret(recipientPub *ecdh.PublicKey, plaintext []byte) ([]byte, error)`
 - `decryptSecret(priv *ecdh.PrivateKey, blob []byte) ([]byte, error)`
 - Helper for marshaling pubkeys to/from base64 for wire transport.
 
-Wire format identical to greenlight: `ephemeral_pubkey(32) ||
-nonce(12) || ciphertext+tag`.
+Wire format: `ephemeral_pubkey(32) || nonce(12) || ciphertext+tag`.
 
 ### Key management
 
@@ -273,12 +271,11 @@ Idempotent: if the server already has the secret for this
 (connection, key, host_id), skip. Logs at INFO level. **Does not**
 delete or modify the yaml file — operator hygiene applies.
 
-### Stdout/stderr scrubber (port from greenlight-cli)
+### Stdout/stderr scrubber
 
-New `secrets_scrubber.go` lifts `encodingsOf` + the streaming
-scrub function from `greenlight-cli/run.go:253-330`. Covers 8
-encoding forms (plaintext, hex up/down, base64 std/url ×
-padded/unpadded, URL-encoded).
+`secrets_scrubber.go` implements `encodingsOf` + the streaming
+scrub function. Covers 8 encoding forms (plaintext, hex up/down,
+base64 std/url × padded/unpadded, URL-encoded).
 
 Wire into `plugin_process.go`:
 - `forwardStderr`: wrap the bufio.Scanner with a scrubber that
@@ -403,9 +400,8 @@ talk to. Daemon commits 4–8 land on the CLI repo.
    daemon-supplied list (option (a) in §5). Trust the daemon to
    filter correctly. A malicious daemon could store anything; the
    trust boundary already includes the daemon.
-7. **Key rotation refuses-with-secrets dance** is greenlight's
-   pattern and ports cleanly, but the UX to drive a rotation
-   isn't shipped in 1d. If a daemon's key file is lost, the
+7. **Key rotation refuses-with-secrets dance** ports cleanly but
+   the UX to drive a rotation isn't shipped in 1d. If a daemon's key file is lost, the
    recovery path is "wipe server's secrets for this host, re-run
    yaml bootstrap." Document.
 
@@ -413,8 +409,8 @@ talk to. Daemon commits 4–8 land on the CLI repo.
 
 - `hearth-cmd/docs/external-resource-adapters.md` §"Credential
   broker" — the architecture committed to.
-- `~/projects/greenlight-cli/crypto.go` — primitives to lift.
-- `~/projects/greenlight-cli/run.go:253-330` — scrubber to lift.
+- `cli/secrets_crypto.go` — crypto primitives (shipped).
+- `cli/secrets_scrubber.go` — output scrubber (shipped).
 - `~/projects/permit/sql/schema.sql` — secrets-table reference.
 - `hearth-cmd-cli/dev_connections.go` — yaml-bootstrap source.
 - `hearth-cmd-cli/plugin_process.go` — Init injection point +

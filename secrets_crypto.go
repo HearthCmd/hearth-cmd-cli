@@ -17,11 +17,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// Crypto primitives for the 1d secrets vault. Lifted near-verbatim
-// from greenlight-cli/crypto.go — the wire format is identical so
-// the iOS app can encrypt secrets the same way once mobile UX
-// lands. Only the on-disk key location changes
-// (~/.greenlight/key → ~/.hearth/key).
+// Crypto primitives for the secrets vault.
 
 // secretKeyPath returns the on-disk location of the daemon's
 // X25519 private key. ~/.hearth/key, mode 0600, dir 0700.
@@ -109,8 +105,8 @@ func loadOrGenerateSecretsKey() (*ecdh.PrivateKey, error) {
 //
 //	ephemeral_public(32) || nonce(12) || ciphertext+tag(16)
 //
-// Identical to greenlight-cli's wire format so the iOS app can
-// produce envelopes the daemon decrypts.
+// Wire format: ephemeral_public(32) || nonce(12) || ciphertext+tag(16).
+// iOS envelopes use the same format so the daemon can decrypt them.
 func encryptSecretEnvelope(recipientPub *ecdh.PublicKey, plaintext []byte) ([]byte, error) {
 	ephemeral, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
