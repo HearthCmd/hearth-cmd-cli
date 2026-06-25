@@ -157,10 +157,9 @@ func ClassifyManifestSource(m PluginManifest) string {
 
 // PluginCredential names a credential the plugin needs (URL, token,
 // API key, etc.). The daemon's credential broker resolves these by
-// name against the greenlight-pattern secrets vault, scoped per
-// Resource Connection, and hands plaintext to the plugin subprocess
-// at Init. Plugin authors never deal in ciphertext or the vault
-// directly.
+// name against the secrets vault, scoped per Resource Connection, and
+// hands plaintext to the plugin subprocess at Init. Plugin authors
+// never deal in ciphertext or the vault directly.
 type PluginCredential struct {
 	Name        string `yaml:"name"        json:"name"`
 	Description string `yaml:"description" json:"description,omitempty"`
