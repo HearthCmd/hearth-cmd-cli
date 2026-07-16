@@ -8,8 +8,35 @@ description: >
 
 # GitHub plugin
 
-Invoke via `hearth resource <connection-id> <verb> [--arg key=value ...]`.
-The connection id is shown in your resource list (e.g. `github-work`).
+Invoke via `hearth resource invoke <connection> <verb> '<args-json>'`.
+
+`<connection>` is the name shown in your resource list — either the slug
+(e.g. `github-work`) or the connection UUID. Both resolve. Examples below
+use `github-work`; substitute the connection you were actually granted.
+
+## Passing arguments
+
+Args are **one JSON object**, quoted as a single shell argument. There is no
+`--arg` flag:
+
+```
+hearth resource invoke github-work get_repo
+hearth resource invoke github-work get_issue '{"number":42}'
+```
+
+`number` and `per_page` are declared as integers — pass them as bare JSON
+numbers, not strings.
+
+The `patch` arg of `update_issue` is a **string containing JSON**, spliced
+into the PATCH body verbatim. It must be escaped inside the outer object.
+This looks awkward and is correct:
+
+```
+hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"title\":\"New title\"}"}'
+```
+
+Passing `patch` as a nested JSON object instead of an escaped string is an
+error.
 
 ## Configured defaults
 
@@ -22,13 +49,13 @@ to those values.
 Before creating an issue or PR, search for duplicates:
 
 ```
-hearth resource github-work search_issues --arg query="is:issue is:open <keywords>"
+hearth resource invoke github-work search_issues '{"query":"is:issue is:open <keywords>"}'
 ```
 
 Before updating an issue, fetch its current state:
 
 ```
-hearth resource github-work get_issue --arg number=42
+hearth resource invoke github-work get_issue '{"number":42}'
 ```
 
 This avoids clobbering changes made since you last read the record.
@@ -38,13 +65,13 @@ This avoids clobbering changes made since you last read the record.
 `get_file` returns base64-encoded content. Decode it before reading:
 
 ```
-hearth resource github-work get_file --arg path=src/foo.go | jq -r '.content' | base64 -d
+hearth resource invoke github-work get_file '{"path":"src/foo.go"}' | jq -r '.content' | base64 -d
 ```
 
 Pass `ref` to read from a specific branch or commit:
 
 ```
-hearth resource github-work get_file --arg path=README.md --arg ref=main
+hearth resource invoke github-work get_file '{"path":"README.md","ref":"main"}'
 ```
 
 ## Issues
@@ -57,27 +84,28 @@ hearth resource github-work get_file --arg path=README.md --arg ref=main
 Use the dedicated verbs for state-only changes:
 
 ```
-hearth resource github-work close_issue --arg number=42
-hearth resource github-work open_issue --arg number=42
+hearth resource invoke github-work close_issue '{"number":42}'
+hearth resource invoke github-work open_issue '{"number":42}'
 ```
 
 ### Updating issue fields
 
-`update_issue` takes a `patch` arg — a raw JSON object containing only the
-fields you want to change. This is passed directly as the PATCH body.
+`update_issue` takes a `patch` arg — a JSON object containing only the fields
+you want to change, carried as an escaped **string** (see "Passing arguments"
+above). It is passed directly as the PATCH body.
 
 ```
 # Change the title
-hearth resource github-work update_issue --arg number=42 --arg patch='{"title":"New title"}'
+hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"title\":\"New title\"}"}'
 
 # Replace the labels array (include all labels you want to keep)
-hearth resource github-work update_issue --arg number=42 --arg patch='{"labels":["bug","help wanted"]}'
+hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"labels\":[\"bug\",\"help wanted\"]}"}'
 
 # Edit the body
-hearth resource github-work update_issue --arg number=42 --arg patch='{"body":"Updated description"}'
+hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"body\":\"Updated description\"}"}'
 
 # Multiple fields at once
-hearth resource github-work update_issue --arg number=42 --arg patch='{"title":"Done","labels":["done"]}'
+hearth resource invoke github-work update_issue '{"number":42,"patch":"{\"title\":\"Done\",\"labels\":[\"done\"]}"}'
 ```
 
 Prefer `close_issue` / `open_issue` for state-only changes — `update_issue`
@@ -88,6 +116,15 @@ is for field edits.
 - `head` is the branch carrying your changes; `base` is the branch you're merging into (usually `main` or `master`).
 - `create_pull_request` requires the head branch to already exist on the remote.
 
+```
+hearth resource invoke github-work create_pull_request '{
+  "title": "Fix the widget",
+  "head": "fix/widget",
+  "base": "main",
+  "body": "Fixes #42."
+}'
+```
+
 ## Code review
 
 `add_pr_review_comment` submits a review, not just a comment. Three event types:
@@ -97,10 +134,11 @@ is for field edits.
 - `REQUEST_CHANGES` — blocks merge until addressed
 
 ```
-hearth resource github-work add_pr_review_comment \
-  --arg number=17 \
-  --arg event=APPROVE \
-  --arg body="LGTM"
+hearth resource invoke github-work add_pr_review_comment '{
+  "number": 17,
+  "event": "APPROVE",
+  "body": "LGTM"
+}'
 ```
 
 Prefer one review call over multiple `add_issue_comment` calls on the PR — it
@@ -111,7 +149,11 @@ gives the author a coherent review to respond to.
 `list_issues`, `list_pull_requests`, and `list_commits` return at most
 `per_page` results (default 30, max 100). There is no pagination in v1.
 If you need more results, use `search_issues` with a scoped query, or
-request a larger `per_page`.
+request a larger `per_page`:
+
+```
+hearth resource invoke github-work list_issues '{"state":"open","per_page":100}'
+```
 
 ## Rate limits
 

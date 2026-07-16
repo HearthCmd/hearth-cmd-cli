@@ -66,7 +66,16 @@ func buildResourcePluginPrompt(agentID string, grants *AgentGrantsStore, store *
 
 	var b strings.Builder
 	b.WriteString("You can invoke external resources via:\n")
-	b.WriteString("  hearth resource invoke <connection-id> <verb> [args-json] [--secret <env>=<id>]\n\n")
+	b.WriteString("  hearth resource invoke <connection> <verb> [args-json] [--secret <env>=<id>]\n\n")
+	b.WriteString("<connection> is the identifier listed under \"Available resources\" below — ")
+	b.WriteString("pass it exactly as shown. args-json is a SINGLE JSON object, quoted as one ")
+	b.WriteString("shell argument. There is no --arg flag. Example:\n")
+	b.WriteString(`  hearth resource invoke my_calendar list_events '{"calendar_id":"primary"}'`)
+	b.WriteString("\n\n")
+	b.WriteString("Args whose name ends in _json take a STRING containing JSON, so the JSON is ")
+	b.WriteString("escaped inside the outer object:\n")
+	b.WriteString(`  hearth resource invoke my_calendar check_availability '{"time_min":"2026-07-20T09:00:00-07:00","time_max":"2026-07-20T18:00:00-07:00","items_json":"[{\"id\":\"alice@example.com\"}]"}'`)
+	b.WriteString("\n\n")
 	b.WriteString("Resource invokes are authorized separately from Bash tool calls ")
 	b.WriteString("and have their own audit log. Errors come back as ")
 	b.WriteString(`"hearth resource: <code>: <message>" on stderr.`)

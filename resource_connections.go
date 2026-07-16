@@ -81,6 +81,29 @@ func (s *ResourceConnectionStore) GetBySlug(slug string) (ResourceConnection, bo
 	return c, ok
 }
 
+// Resolve looks a connection up by slug first, then by UUID. This is
+// the entry point for anything a human or an agent typed.
+//
+// Slug wins on a collision. Slugs are snake_case and UUIDs are not, so
+// the two namespaces can't actually overlap; the ordering just makes
+// the common case one map hit.
+//
+// Both spellings have to work. The agent's system prompt labels each
+// connection with its slug but falls back to the UUID when the slug is
+// empty (resource_prompt.go), so an agent can be handed either one and
+// has no way to tell which. A slug-only lookup made every connection
+// without a slug silently unusable — the agent would invoke exactly the
+// identifier it was shown and get "unknown connection".
+func (s *ResourceConnectionStore) Resolve(ref string) (ResourceConnection, bool) {
+	if ref == "" {
+		return ResourceConnection{}, false
+	}
+	if c, ok := s.GetBySlug(ref); ok {
+		return c, true
+	}
+	return s.Get(ref)
+}
+
 // List returns all registered ResourceConnections. Order is unspecified;
 // callers that need determinism should sort. Concurrency-safe.
 func (s *ResourceConnectionStore) List() []ResourceConnection {

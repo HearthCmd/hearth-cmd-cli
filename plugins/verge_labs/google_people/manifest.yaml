@@ -12,7 +12,7 @@ description: |
   enabled in Google Workspace Admin. Not suitable for personal Google accounts
   or per-user access. For individual user access, use the
   verge_labs/google_people_oauth plugin instead.
-version: 0.1.0
+version: 0.1.1
 manifest_schema: 2
 
 config_schema:

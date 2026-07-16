@@ -45,10 +45,20 @@ Subcommands:
       the same organization aren't shown. Use the webview (Settings →
       Debug → Resource Connections) for the org-wide view.
 
-  invoke <connection-id> <verb> [args-json] [--secret ENV=<secret-id> ...]
+  invoke <connection> <verb> [args-json] [--secret ENV=<secret-id> ...]
       Dispatch a verb call to the plugin backing a Resource Connection
-      and print the plugin's response. args-json is an optional JSON
-      object passed verbatim as the verb's args; omit for null.
+      and print the plugin's response. <connection> is the slug or the
+      UUID; "hearth resource list" prints both.
+
+      args-json is an optional JSON object passed verbatim as the verb's
+      args; omit for null. It is ONE shell argument, not repeated flags:
+
+          hearth resource invoke my_calendar list_events '{"calendar_id":"primary"}'
+
+      Args named *_json take a string containing JSON, so that JSON is
+      escaped inside the outer object:
+
+          hearth resource invoke my_calendar check_availability '{"time_min":"2026-07-20T09:00:00-07:00","items_json":"[{\"id\":\"alice@example.com\"}]"}'
 
       --secret ENV=<secret-id> may repeat. The daemon authorizes each
       secret via IAM (resource_kind='secret', action='secret.use'),
@@ -57,7 +67,7 @@ Subcommands:
       cleartext never enters the agent's transcript; the daemon
       scrubs it (and encoded variants) from the plugin's response.
 
-  refresh <connection-id> [--secret ENV=<secret-id> ...]
+  refresh <connection> [--secret ENV=<secret-id> ...]
       Run the connection's declarative snapshot (manifest.snapshot
       block), replace the daemon-local entity cache, and print the
       number of entities pulled. Declarative adapters only; binary
@@ -100,7 +110,7 @@ func runResourceInvoke(args []string) {
 		positional = append(positional, args[i])
 	}
 	if len(positional) < 2 || len(positional) > 3 {
-		fmt.Fprintln(os.Stderr, "Usage: hearth resource invoke <connection-id> <verb> [args-json] [--secret ENV=<id> ...]")
+		fmt.Fprintln(os.Stderr, "Usage: hearth resource invoke <connection> <verb> [args-json] [--secret ENV=<id> ...]")
 		os.Exit(1)
 	}
 	connID := positional[0]
@@ -208,7 +218,7 @@ func runResourceRefresh(args []string) {
 		positional = append(positional, args[i])
 	}
 	if len(positional) != 1 {
-		fmt.Fprintln(os.Stderr, "Usage: hearth resource refresh <connection-id> [--secret ENV=<id> ...]")
+		fmt.Fprintln(os.Stderr, "Usage: hearth resource refresh <connection> [--secret ENV=<id> ...]")
 		os.Exit(1)
 	}
 	req := ipcRequest{

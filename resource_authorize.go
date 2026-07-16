@@ -5,25 +5,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
-
-// resourceAuthzBypass reports whether HEARTH_RESOURCE_AUTHZ_BYPASS
-// is set to a truthy value. When true, the daemon skips both the
-// boot-time rule seed and the per-invoke preflight authorize call —
-// behaving the way pre-1e dogfooding did. Belt-and-suspenders for
-// running the daemon disconnected from the server during local dev.
-// Production binaries ship with this gate available; that's a known
-// dev affordance (see docs/resource-plugins-1e-plan.md §7).
-func resourceAuthzBypass() bool {
-	switch os.Getenv("HEARTH_RESOURCE_AUTHZ_BYPASS") {
-	case "1", "true", "TRUE", "yes":
-		return true
-	}
-	return false
-}
 
 // authzWS is the subset of DaemonWS that the resource-plugin
 // authorize preflight needs. Stubbed in tests so we can exercise
@@ -131,9 +115,6 @@ type authorizeResourceInvokeResp struct {
 // running pre-step-5). Caller threads it into PluginSupervisor.Invoke
 // so plugin StateGet/Put RPCs scope correctly.
 func (d *Daemon) preflightAuthorizeResourceInvoke(ws authzWS, principalKind, principalID, connID, pluginType, verb string, args json.RawMessage, claimedAgentInstanceID string) (string, *PluginError) {
-	if resourceAuthzBypass() {
-		return "", nil
-	}
 	if ws == nil || !ws.IsConnected() {
 		return "", &PluginError{
 			Code:    ErrUnavailable,

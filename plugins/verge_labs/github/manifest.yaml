@@ -6,7 +6,7 @@ description: |
   Read and write GitHub issues, pull requests, files, and commits via the
   GitHub REST API. One connection = one primary owner/repo. For multiple
   repos create multiple connections backed by the same plugin type.
-version: 0.1.0
+version: 0.1.1
 manifest_schema: 2
 
 config_schema:
@@ -247,12 +247,13 @@ verbs:
   - name: update_issue
     description: |
       Update fields of an existing issue. Required args: number, patch.
-      patch is a raw JSON object containing only the fields to change.
-      Examples:
-        Change title:   --arg patch='{"title":"New title"}'
-        Replace labels: --arg patch='{"labels":["bug","help wanted"]}'
-        Edit body:      --arg patch='{"body":"Updated description"}'
-        Multiple:       --arg patch='{"title":"Done","labels":["done"]}'
+      patch is a STRING containing a JSON object of only the fields to
+      change — it is spliced into the request body verbatim, so the JSON
+      inside it is escaped. Examples (args are one JSON object):
+        Change title:   '{"number":42,"patch":"{\"title\":\"New title\"}"}'
+        Replace labels: '{"number":42,"patch":"{\"labels\":[\"bug\"]}"}'
+        Edit body:      '{"number":42,"patch":"{\"body\":\"Updated\"}"}'
+        Multiple:       '{"number":42,"patch":"{\"title\":\"Done\",\"labels\":[\"done\"]}"}'
       Prefer close_issue / open_issue for state-only changes.
     grant_categories: [write, issues]
     args:

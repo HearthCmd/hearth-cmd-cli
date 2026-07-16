@@ -12,7 +12,7 @@ description: |
   verge_labs/google_calendar_oauth plugin instead.
 
   One connection = one impersonated Workspace user's calendar.
-version: 0.1.0
+version: 0.1.1
 manifest_schema: 2
 
 config_schema:
@@ -23,7 +23,7 @@ config_schema:
       type: string
       description: |
         The Google Workspace user whose calendar this connection acts as
-        (e.g. flogg@vergelabs.org). Events and invites will appear to come
+        (e.g. someone@vergelabs.org). Events and invites will appear to come
         from this person. The service account must have domain-wide delegation
         granted for the Calendar API scopes in Google Workspace Admin →
         Security → API controls.

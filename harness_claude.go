@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"time"
@@ -101,16 +102,22 @@ func (claudeHarness) PreSpawn(ctx HarnessCtx) error {
 // InstallSkill writes the skill to <cwd>/.claude/skills/<slug>-<connID>/SKILL.md
 // so Claude Code's native progressive-loading picks it up automatically.
 // The file is written as-is (the plugin's skill.md already carries Claude
-// YAML frontmatter). Existing files are left alone — same policy as
-// installHearthInstructions: user edits are preserved across restarts.
+// YAML frontmatter).
+//
+// This directory is entirely hearth-managed — we write it here and delete it
+// in RemoveSkill; the plugin's skill.md is the source of truth, not a user
+// document. So we rewrite when the content differs (a plugin upgrade shipping
+// a fixed skill must reach an agent that already holds the old one — the whole
+// point of re-running this on every (re)spawn) and no-op when it already
+// matches to avoid needless churn.
 func (claudeHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {
 	dir := filepath.Join(ctx.Cwd, ".claude", "skills", pluginSlug+"-"+connectionID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	dest := filepath.Join(dir, "SKILL.md")
-	if _, err := os.Stat(dest); err == nil {
-		return nil // already present — don't clobber user edits
+	if existing, err := os.ReadFile(dest); err == nil && bytes.Equal(existing, skillContent) {
+		return nil // already up to date — don't rewrite identical content
 	}
 	return os.WriteFile(dest, skillContent, 0o644)
 }

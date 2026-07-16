@@ -664,9 +664,6 @@ func runDaemonForeground() {
 	// Agent grants store starts empty too; fetchAgentResourceGrantsAtBoot
 	// fills it on the same trigger points.
 	d.agentGrants = NewAgentGrantsStore()
-	if resourceAuthzBypass() {
-		log.Printf("daemon: WARNING HEARTH_RESOURCE_AUTHZ_BYPASS is set; plugin invokes will skip the IAM authorize step (not for production)")
-	}
 	// Open the daemon's local sqlite for plugin Tier 2 state. Failures
 	// are non-fatal — the daemon continues without plugin_state support
 	// and State* RPCs from plugins error out cleanly. See
@@ -1335,10 +1332,10 @@ func (d *Daemon) handleResourceInvoke(conn net.Conn, req ipcRequest) {
 	// again inside PluginSupervisor.Invoke; duplicate work is fine for
 	// the 1e stopgap (1g restructures the eval path and the duplication
 	// goes away).
-	// req.ResourceConnectionID is the slug typed by the user / agent.
-	// Resolve it to the UUID-keyed entry so all downstream server calls
-	// and local-DB keys use the stable UUID.
-	rc, ok := d.resourceConnections.GetBySlug(req.ResourceConnectionID)
+	// req.ResourceConnectionID is whatever the user / agent typed —
+	// slug or UUID. Resolve it to the UUID-keyed entry so all downstream
+	// server calls and local-DB keys use the stable UUID.
+	rc, ok := d.resourceConnections.Resolve(req.ResourceConnectionID)
 	if !ok {
 		sendControl(conn, ipcResponse{
 			Type:            "error",
@@ -1618,8 +1615,9 @@ func (d *Daemon) handleResourceRefresh(conn net.Conn, req ipcRequest) {
 		sendControl(conn, ipcResponse{Type: "error", Message: "missing resource_connection_id"})
 		return
 	}
-	// req.ResourceConnectionID is the slug typed by the user / agent.
-	rc, ok := d.resourceConnections.GetBySlug(req.ResourceConnectionID)
+	// req.ResourceConnectionID is whatever the user / agent typed —
+	// slug or UUID.
+	rc, ok := d.resourceConnections.Resolve(req.ResourceConnectionID)
 	if !ok {
 		sendControl(conn, ipcResponse{
 			Type:            "error",

@@ -163,6 +163,156 @@ func TestRemoveHearthInstructions_MissingFileIsSilent(t *testing.T) {
 	removeHearthInstructions("/nonexistent/path/whatever.md")
 }
 
+// appendSkillToInstructionFile is the skill installer for codex / gemini /
+// copilot (Claude uses its own .claude/skills dir). Behavior locked in here:
+//   - installs into a hearth-owned file, skips non-hearth / missing files
+//   - a plugin upgrade (changed skill body) REPLACES the old section in place
+//     (the Phase-1 landmine: agents holding the broken skill must get the fix)
+//   - an unchanged body is a byte-for-byte no-op (no needless rewrite)
+//   - a second connection's section coexists and survives the first's upgrade
+
+func hearthInstrFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "AGENTS.md")
+	if err := os.WriteFile(p, []byte("<!-- hearth -->\n# base instructions\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestAppendSkill_InstallsAndIsIdempotent(t *testing.T) {
+	p := hearthInstrFile(t)
+	skill := []byte("---\nname: cal\n---\nUse the calendar verbs.\n")
+
+	if err := appendSkillToInstructionFile(p, "conn-1", "gcal", skill); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	after1 := readFile(t, p)
+	if !strings.Contains(after1, "<!-- hearth-skill:conn-1 -->") {
+		t.Fatalf("skill marker missing: %q", after1)
+	}
+	if !strings.Contains(after1, "Use the calendar verbs.") || strings.Contains(after1, "name: cal") {
+		t.Errorf("frontmatter should be stripped, body kept: %q", after1)
+	}
+
+	// Re-install the identical skill — must not change a byte.
+	if err := appendSkillToInstructionFile(p, "conn-1", "gcal", skill); err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	if got := readFile(t, p); got != after1 {
+		t.Errorf("identical reinstall rewrote file:\n before=%q\n after =%q", after1, got)
+	}
+}
+
+func TestAppendSkill_UpgradeReplacesInPlace(t *testing.T) {
+	p := hearthInstrFile(t)
+	old := []byte("---\nname: cal\n---\nOLD broken instructions.\n")
+	fixed := []byte("---\nname: cal\n---\nFIXED working instructions.\n")
+
+	if err := appendSkillToInstructionFile(p, "conn-1", "gcal", old); err != nil {
+		t.Fatalf("install old: %v", err)
+	}
+	if err := appendSkillToInstructionFile(p, "conn-1", "gcal", fixed); err != nil {
+		t.Fatalf("install fixed: %v", err)
+	}
+	got := readFile(t, p)
+	if strings.Contains(got, "OLD broken instructions.") {
+		t.Errorf("old skill body survived the upgrade: %q", got)
+	}
+	if !strings.Contains(got, "FIXED working instructions.") {
+		t.Errorf("fixed skill body missing after upgrade: %q", got)
+	}
+	if n := strings.Count(got, "<!-- hearth-skill:conn-1 -->"); n != 1 {
+		t.Errorf("expected exactly one section for conn-1, got %d: %q", n, got)
+	}
+}
+
+func TestAppendSkill_UpgradePreservesOtherSection(t *testing.T) {
+	p := hearthInstrFile(t)
+	must := func(connID, slug, body string) {
+		if err := appendSkillToInstructionFile(p, connID, slug, []byte(body)); err != nil {
+			t.Fatalf("append %s: %v", connID, err)
+		}
+	}
+	must("conn-1", "gcal", "calendar v1")
+	must("conn-2", "gdrive", "drive verbs")
+	// Upgrade the FIRST (now non-terminal) section.
+	must("conn-1", "gcal", "calendar v2")
+
+	got := readFile(t, p)
+	if strings.Contains(got, "calendar v1") || !strings.Contains(got, "calendar v2") {
+		t.Errorf("conn-1 upgrade wrong: %q", got)
+	}
+	if !strings.Contains(got, "drive verbs") {
+		t.Errorf("conn-2 section clobbered by conn-1 upgrade: %q", got)
+	}
+	if strings.Index(got, "conn-1") > strings.Index(got, "conn-2") {
+		t.Errorf("section order not preserved across in-place upgrade: %q", got)
+	}
+}
+
+func TestAppendSkill_NonHearthFileIsNoop(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "AGENTS.md")
+	orig := "# user's own agents file\n"
+	if err := os.WriteFile(p, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendSkillToInstructionFile(p, "conn-1", "gcal", []byte("skill")); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := readFile(t, p); got != orig {
+		t.Errorf("non-hearth file was modified: %q", got)
+	}
+}
+
+// Claude installs skills as their own hearth-managed files under
+// .claude/skills/<slug>-<connID>/SKILL.md. Same upgrade requirement as the
+// instruction-file path: a changed plugin skill must overwrite the old one.
+func TestClaudeInstallSkill_UpgradeOverwrites(t *testing.T) {
+	cwd := t.TempDir()
+	h := claudeHarness{}
+	ctx := HarnessCtx{Cwd: cwd}
+	dest := filepath.Join(cwd, ".claude", "skills", "gcal-conn-1", "SKILL.md")
+
+	if err := h.InstallSkill(ctx, "conn-1", "gcal", []byte("v1 body\n")); err != nil {
+		t.Fatalf("install v1: %v", err)
+	}
+	if got := readFile(t, dest); got != "v1 body\n" {
+		t.Fatalf("v1 not written: %q", got)
+	}
+	if err := h.InstallSkill(ctx, "conn-1", "gcal", []byte("v2 body\n")); err != nil {
+		t.Fatalf("install v2: %v", err)
+	}
+	if got := readFile(t, dest); got != "v2 body\n" {
+		t.Errorf("upgrade did not overwrite SKILL.md; got %q", got)
+	}
+}
+
+func TestClaudeInstallSkill_IdenticalIsNoop(t *testing.T) {
+	cwd := t.TempDir()
+	h := claudeHarness{}
+	ctx := HarnessCtx{Cwd: cwd}
+	dest := filepath.Join(cwd, ".claude", "skills", "gcal-conn-1", "SKILL.md")
+
+	if err := h.InstallSkill(ctx, "conn-1", "gcal", []byte("same body\n")); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	fi1, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.InstallSkill(ctx, "conn-1", "gcal", []byte("same body\n")); err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	fi2, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi1.ModTime().Equal(fi2.ModTime()) {
+		t.Errorf("identical reinstall rewrote the file (mtime changed %v -> %v)", fi1.ModTime(), fi2.ModTime())
+	}
+}
+
 func TestIsHearthInstructionFile(t *testing.T) {
 	if !isHearthInstructionFile("<!-- hearth -->\nfoo") {
 		t.Error("expected match")

@@ -8,17 +8,44 @@ description: >
 
 # Google Drive plugin
 
-Invoke via `hearth resource <connection-slug> <verb> [--arg key=value ...]`.
-The connection slug is shown in your resource list (e.g. `my_drive`).
+Invoke via `hearth resource invoke <connection> <verb> '<args-json>'`.
+
+`<connection>` is the name shown in your resource list — either the slug
+(e.g. `my_drive`) or the connection UUID. Both resolve. Examples below
+use `my_drive`; substitute the connection you were actually granted.
+
+## Passing arguments
+
+Args are **one JSON object**, quoted as a single shell argument. There is no
+`--arg` flag. Omit the object entirely for a verb that takes no args:
+
+```
+hearth resource invoke my_drive list_files
+hearth resource invoke my_drive get_file_metadata '{"file_id":"<id>"}'
+```
+
+Args whose name ends in `_json` take a **string containing JSON**, so that
+JSON is escaped inside the outer object (`"items_json": "[{\"id\":\"a\"}]"`,
+not a nested array). No Drive verb currently takes a `_json` arg — every arg
+here is a plain string — but the rule holds if one is added.
 
 ## Finding files
 
 Start with a search rather than a listing when you know what you're looking for:
 
 ```
-hearth resource my_drive search_files --arg query="name contains 'budget'"
-hearth resource my_drive search_files --arg query="fullText contains 'Q3 revenue'"
-hearth resource my_drive search_files --arg query="mimeType = 'text/plain'"
+hearth resource invoke my_drive search_files '{"query":"name contains '\''budget'\''"}'
+hearth resource invoke my_drive search_files '{"query":"fullText contains '\''Q3 revenue'\''"}'
+hearth resource invoke my_drive search_files '{"query":"mimeType = '\''text/plain'\''"}'
+```
+
+Drive query syntax uses single quotes, which collide with the single quotes
+wrapping the JSON. The `'\''` sequence above closes, escapes, and reopens the
+shell quote. Double-quoting the whole argument and escaping the inner double
+quotes works too:
+
+```
+hearth resource invoke my_drive search_files "{\"query\":\"name contains 'budget'\"}"
 ```
 
 Queries follow Google's Drive query syntax:
@@ -28,17 +55,17 @@ To list the contents of a known folder, use the folder's Drive ID (from its
 URL or from a previous search result):
 
 ```
-hearth resource my_drive list_folder_contents --arg folder_id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms
+hearth resource invoke my_drive list_folder_contents '{"folder_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"}'
 ```
 
-Pass `folder_id=root` for the top of My Drive.
+Pass `"folder_id": "root"` for the top of My Drive.
 
 ## Reading file content
 
 For plain text, Markdown, code, CSV, PDF — use `download_file`:
 
 ```
-hearth resource my_drive download_file --arg file_id=<id>
+hearth resource invoke my_drive download_file '{"file_id":"<id>"}'
 ```
 
 For Google Workspace files (Docs, Sheets, Slides) — use `export_file` with
@@ -46,16 +73,16 @@ a target MIME type:
 
 ```
 # Google Doc → plain text
-hearth resource my_drive export_file --arg file_id=<id> --arg mime_type=text/plain
+hearth resource invoke my_drive export_file '{"file_id":"<id>","mime_type":"text/plain"}'
 
 # Google Doc → Word
-hearth resource my_drive export_file --arg file_id=<id> --arg mime_type=application/vnd.openxmlformats-officedocument.wordprocessingml.document
+hearth resource invoke my_drive export_file '{"file_id":"<id>","mime_type":"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}'
 
 # Google Sheet → CSV
-hearth resource my_drive export_file --arg file_id=<id> --arg mime_type=text/csv
+hearth resource invoke my_drive export_file '{"file_id":"<id>","mime_type":"text/csv"}'
 
 # Any file → PDF
-hearth resource my_drive export_file --arg file_id=<id> --arg mime_type=application/pdf
+hearth resource invoke my_drive export_file '{"file_id":"<id>","mime_type":"application/pdf"}'
 ```
 
 `download_file` on a Google Workspace file returns an error — use `export_file`
@@ -66,7 +93,7 @@ for those types.
 Before moving, renaming, or trashing a file, read its current state:
 
 ```
-hearth resource my_drive get_file_metadata --arg file_id=<id>
+hearth resource invoke my_drive get_file_metadata '{"file_id":"<id>"}'
 ```
 
 The response includes `parents` (the current parent folder IDs) — you need
@@ -75,29 +102,32 @@ this for `move_file`.
 ## Creating files
 
 `create_file` creates a metadata-only record and returns the new file's `id`.
-You must supply a `parent_id`; pass `root` for My Drive root.
+You must supply a `parent_id`; pass `"root"` for My Drive root.
 
 ```
 # Create an empty text file
-hearth resource my_drive create_file \
-  --arg name="notes.md" \
-  --arg mime_type=text/markdown \
-  --arg parent_id=root
+hearth resource invoke my_drive create_file '{
+  "name": "notes.md",
+  "mime_type": "text/markdown",
+  "parent_id": "root"
+}'
 
 # Create an empty Google Doc
-hearth resource my_drive create_file \
-  --arg name="Draft" \
-  --arg mime_type=application/vnd.google-apps.document \
-  --arg parent_id=<folder_id>
+hearth resource invoke my_drive create_file '{
+  "name": "Draft",
+  "mime_type": "application/vnd.google-apps.document",
+  "parent_id": "<folder_id>"
+}'
 ```
 
 To set the file's content immediately, follow with `upload_file_content`:
 
 ```
-hearth resource my_drive upload_file_content \
-  --arg file_id=<id> \
-  --arg mime_type=text/markdown \
-  --arg content="# My document\n\nContent here."
+hearth resource invoke my_drive upload_file_content '{
+  "file_id": "<id>",
+  "mime_type": "text/markdown",
+  "content": "# My document\n\nContent here."
+}'
 ```
 
 `upload_file_content` replaces the entire file content. It works for plain
@@ -108,27 +138,26 @@ text file and let the user convert, or use the Docs API (not this plugin).
 
 Rename:
 ```
-hearth resource my_drive rename_file --arg file_id=<id> --arg name="New name.md"
+hearth resource invoke my_drive rename_file '{"file_id":"<id>","name":"New name.md"}'
 ```
 
 Move (requires the current parent ID — get it from `get_file_metadata`):
 ```
-hearth resource my_drive move_file \
-  --arg file_id=<id> \
-  --arg new_parent_id=<destination_folder_id> \
-  --arg old_parent_id=<current_parent_id>
+hearth resource invoke my_drive move_file '{
+  "file_id": "<id>",
+  "new_parent_id": "<destination_folder_id>",
+  "old_parent_id": "<current_parent_id>"
+}'
 ```
 
 Create a folder:
 ```
-hearth resource my_drive create_folder \
-  --arg name="2024 Reports" \
-  --arg parent_id=root
+hearth resource invoke my_drive create_folder '{"name":"2026 Reports","parent_id":"root"}'
 ```
 
 Trash (recoverable from Drive's Trash):
 ```
-hearth resource my_drive trash_file --arg file_id=<id>
+hearth resource invoke my_drive trash_file '{"file_id":"<id>"}'
 ```
 
 Trashing is always preferred over permanent deletion. There is no
@@ -138,28 +167,34 @@ permanent-delete verb — use the Drive web UI for that.
 
 ```
 # Share with a specific user
-hearth resource my_drive share_file \
-  --arg file_id=<id> \
-  --arg role=writer \
-  --arg type=user \
-  --arg email_address=colleague@example.com
+hearth resource invoke my_drive share_file '{
+  "file_id": "<id>",
+  "role": "writer",
+  "type": "user",
+  "email_address": "colleague@example.com"
+}'
 
 # Share with everyone in a domain
-hearth resource my_drive share_file \
-  --arg file_id=<id> \
-  --arg role=reader \
-  --arg type=domain \
-  --arg email_address=vergelabs.org
+hearth resource invoke my_drive share_file '{
+  "file_id": "<id>",
+  "role": "reader",
+  "type": "domain",
+  "email_address": "vergelabs.org"
+}'
 
 # Make publicly readable
-hearth resource my_drive share_file \
-  --arg file_id=<id> \
-  --arg role=reader \
-  --arg type=anyone \
-  --arg email_address=""
+hearth resource invoke my_drive share_file '{
+  "file_id": "<id>",
+  "role": "reader",
+  "type": "anyone",
+  "email_address": ""
+}'
 ```
 
 Roles: `reader`, `commenter`, `writer`, `fileOrganizer`, `organizer`, `owner`.
+
+`email_address` is required on every `share_file` call — pass an empty string
+when `type` is `anyone`.
 
 ## File IDs vs names
 

@@ -12,7 +12,7 @@ description: |
   verge_labs/google_drive_oauth plugin instead.
 
   One connection = one impersonated Workspace user's Drive.
-version: 0.1.0
+version: 0.1.1
 manifest_schema: 2
 
 config_schema:
@@ -22,7 +22,7 @@ config_schema:
       type: string
       description: |
         The Google Workspace user email this connection will act as
-        (e.g. flogg@vergelabs.org). Required only for personal My Drive
+        (e.g. someone@vergelabs.org). Required only for personal My Drive
         access via domain-wide delegation. Leave blank when the service
         account is a direct member of a Shared Drive.
     root_folder_id:

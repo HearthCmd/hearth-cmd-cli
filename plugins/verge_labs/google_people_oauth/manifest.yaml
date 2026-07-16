@@ -1,18 +1,22 @@
 plugin_slug: verge_labs/google_people_oauth
 namespace: verge_labs
 author: Verge Labs
-display_name: Google People
+display_name: Google Contacts
 auth_scheme: oauth2_user
 description: |
-  Look up contacts and people via the Google People API v1.
-  Returns names, email addresses, phone numbers, job titles, and departments.
-  Read-only.
+  Look up the people in your Google Contacts — family, neighbours, the
+  plumber, the kids' school. Returns names, email addresses, and phone
+  numbers. Read-only.
 
-  AUTH: Connects as a specific Google user via OAuth. Returns the connected
-  user's personal contacts and, for Workspace accounts, the org directory.
-  For domain-wide directory access without per-user auth, use
-  verge_labs/google_people (service account) instead.
-version: 0.1.0
+  Used mainly to turn a name into an address: "email the roofer we used
+  last spring" or "invite my sister to dinner Saturday" both need a real
+  email address before anything can be sent.
+
+  AUTH: Connects as a specific Google user via OAuth, and reads that
+  user's own contacts. For Workspace domain-directory access (the org
+  address book, not personal contacts) use verge_labs/google_people
+  (service account) instead.
+version: 0.2.1
 manifest_schema: 2
 
 credentials:
@@ -20,19 +24,27 @@ credentials:
     type: oauth2_google
     secret: true
     scopes:
+      # Authorizes the personal-contacts endpoints below (searchContacts,
+      # people/me/connections). Deliberately NOT directory.readonly — that
+      # reads a Workspace org directory, which a household user does not
+      # have, and which we have no business asking for.
       - https://www.googleapis.com/auth/contacts.readonly
     description: |
       Your Google account, connected via OAuth. Hearth will request
       read-only access to your contacts.
 
 verbs:
-  - name: search_people
+  - name: search_contacts
     description: |
-      Search the user's contacts and Workspace directory for people
-      matching a name or email fragment. Required args: query (e.g.
-      "Alice", "eng@", "smith"). Returns up to 30 matches with
-      displayName, emailAddresses, phoneNumbers, organizations (title,
-      department), and resourceName (needed for get_person).
+      Search the user's Google Contacts by name, email, or phone fragment.
+      Required args: query (e.g. "Sarah", "plumber", "@school.org").
+      Returns up to 30 matches with displayName, emailAddresses,
+      phoneNumbers, and resourceName (needed for get_contact).
+
+      This is the verb to use when you have a name and need an address —
+      e.g. before drafting an email or adding someone to a calendar invite.
+
+      Note: results come back under `results[].person`, not a bare list.
     grant_categories: [read]
     args:
       query:
@@ -41,34 +53,34 @@ verbs:
     output: json
     http:
       method: GET
-      url: "https://people.googleapis.com/v1/people:searchDirectoryPeople?query={{args.query}}&readMask=names,emailAddresses,phoneNumbers,organizations,photos&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=30"
+      url: "https://people.googleapis.com/v1/people:searchContacts?query={{args.query}}&readMask=names,emailAddresses,phoneNumbers,organizations&pageSize=30"
       headers:
         Authorization: "Bearer {{credentials.user_token.access_token}}"
       response:
         success_status: [200]
 
-  - name: list_people
+  - name: list_contacts
     description: |
-      Page through the Workspace directory. Returns up to 100 people per
-      call with displayName, emailAddresses, phoneNumbers, and
-      organizations. Use search_people for targeted lookups; use this
-      only when you need to enumerate the directory.
+      Page through the user's saved contacts. Returns up to 100 people per
+      call with displayName, emailAddresses, and phoneNumbers, under a
+      `connections` list. Prefer search_contacts for targeted lookups; use
+      this only when you genuinely need to enumerate everyone.
     grant_categories: [read]
     output: json
     http:
       method: GET
-      url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses,phoneNumbers,organizations&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+      url: "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations&sortOrder=FIRST_NAME_ASCENDING&pageSize=100"
       headers:
         Authorization: "Bearer {{credentials.user_token.access_token}}"
       response:
         success_status: [200]
 
-  - name: get_person
+  - name: get_contact
     description: |
-      Fetch full profile details for a specific person by their resource
-      name (e.g. "people/c12345678" from a search_people result).
+      Fetch full details for one contact by resource name (e.g.
+      "people/c12345678", as returned by search_contacts).
       Required args: resource_name. Returns names, emailAddresses,
-      phoneNumbers, organizations, biographies, and photos.
+      phoneNumbers, addresses, organizations, and biographies.
     grant_categories: [read]
     args:
       resource_name:
@@ -77,7 +89,7 @@ verbs:
     output: json
     http:
       method: GET
-      url: "https://people.googleapis.com/v1/{{args.resource_name}}?personFields=names,emailAddresses,phoneNumbers,organizations,biographies,photos"
+      url: "https://people.googleapis.com/v1/{{args.resource_name}}?personFields=names,emailAddresses,phoneNumbers,addresses,organizations,biographies"
       headers:
         Authorization: "Bearer {{credentials.user_token.access_token}}"
       response:
@@ -85,17 +97,17 @@ verbs:
 
 snapshot:
   description: |
-    List up to 100 people from the directory. Used to scope IAM rules
-    to specific directory entries.
+    List up to 100 of the user's contacts. Used to scope IAM rules to
+    specific people.
   http:
     method: GET
-    url: "https://people.googleapis.com/v1/people:listDirectoryPeople?readMask=names,emailAddresses&sources=DIRECTORY_SOURCE_TYPE_DOMAIN_PROFILE&pageSize=100"
+    url: "https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses&pageSize=100"
     headers:
       Authorization: "Bearer {{credentials.user_token.access_token}}"
     response:
       success_status: [200]
   extract:
-    iterate: "$.people[*]"
+    iterate: "$.connections[*]"
     entity_id: "$.resourceName"
     kind:
       literal: gpeople.person
@@ -104,9 +116,9 @@ snapshot:
       email: "$.emailAddresses[0].value"
 
 default_rules:
-  - action: external_resource.verge_labs/google_people_oauth.search_people
+  - action: external_resource.verge_labs/google_people_oauth.search_contacts
     decision: allow
-  - action: external_resource.verge_labs/google_people_oauth.list_people
+  - action: external_resource.verge_labs/google_people_oauth.list_contacts
     decision: allow
-  - action: external_resource.verge_labs/google_people_oauth.get_person
+  - action: external_resource.verge_labs/google_people_oauth.get_contact
     decision: allow

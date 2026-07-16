@@ -73,27 +73,18 @@ func defaultAgentHomeBase() string {
 
 // promptAgentHomePath asks the user where agent working directories
 // should live on this host. Run only on first-host enrollment
-// (is_new_host=true from the server). The default is the org-agnostic
-// base ($HOME/hearth_agents); the prompt previews how each of the
-// user's existing orgs will namespace into per-slug subdirectories so
-// the choice is self-documenting.
+// (is_new_host=true from the server). The default is $HOME/hearth_agents;
+// a single example shows how households namespace into subdirectories.
 func promptAgentHomePath(reader *bufio.Reader, orgs []daemonOrgEntry) string {
 	base := defaultAgentHomeBase()
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Where should agents on this host live?")
 	fmt.Fprintln(os.Stderr, "  Each household gets its own subdirectory under this base. For example:")
-	if len(orgs) == 0 {
-		// No orgs yet — shouldn't happen post-enroll, but handle gracefully.
-		fmt.Fprintf(os.Stderr, "    %s/<household_slug>/...\n", base)
-	} else {
-		for _, o := range orgs {
-			slug := o.Slug
-			if slug == "" {
-				slug = "<household>"
-			}
-			fmt.Fprintf(os.Stderr, "    %s\n", filepath.Join(base, slug))
-		}
+	exampleSlug := "<household>"
+	if len(orgs) > 0 && orgs[0].Slug != "" {
+		exampleSlug = orgs[0].Slug
 	}
+	fmt.Fprintf(os.Stderr, "    %s\n", filepath.Join(base, exampleSlug))
 	return promptWithDefault(reader, "  Agent home directory", base)
 }
 

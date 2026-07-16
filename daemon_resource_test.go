@@ -213,7 +213,6 @@ func TestHandleResourceInvoke_MissingFields(t *testing.T) {
 }
 
 func TestHandleResourceInvoke_AuthzDeny(t *testing.T) {
-	setBypassEnv(t, "") // guarantee deny path runs regardless of outer env
 	ws := denyAuthzWS("no matching rule")
 	d := newSupervisedDaemonWithAuthz(t, ws)
 
@@ -241,7 +240,6 @@ func TestHandleResourceInvoke_AuthzDeny(t *testing.T) {
 }
 
 func TestHandleResourceInvoke_AuthzWSOffline(t *testing.T) {
-	setBypassEnv(t, "")
 	d := newSupervisedDaemonWithAuthz(t, &fakeAuthzWS{CanConnect: false})
 	resp := ipcRoundTrip(t, d, ipcRequest{
 		Type:                 "resource_invoke",
@@ -335,93 +333,6 @@ func TestHandleResourceInvoke_AuthzCallCarriesArgs(t *testing.T) {
 	}
 }
 
-// setBypassEnv installs HEARTH_RESOURCE_AUTHZ_BYPASS for the
-// duration of a test, restoring the prior value on cleanup. The
-// bypass affects package-global env state, so tests that depend on
-// it are not run in parallel.
-func setBypassEnv(t *testing.T, value string) {
-	t.Helper()
-	prev, hadPrev := os.LookupEnv("HEARTH_RESOURCE_AUTHZ_BYPASS")
-	if value == "" {
-		os.Unsetenv("HEARTH_RESOURCE_AUTHZ_BYPASS")
-	} else {
-		os.Setenv("HEARTH_RESOURCE_AUTHZ_BYPASS", value)
-	}
-	t.Cleanup(func() {
-		if hadPrev {
-			os.Setenv("HEARTH_RESOURCE_AUTHZ_BYPASS", prev)
-		} else {
-			os.Unsetenv("HEARTH_RESOURCE_AUTHZ_BYPASS")
-		}
-	})
-}
-
-func TestResourceAuthzBypass_ParsesTruthy(t *testing.T) {
-	tests := []struct {
-		val  string
-		want bool
-	}{
-		{"", false},
-		{"1", true},
-		{"true", true},
-		{"TRUE", true},
-		{"yes", true},
-		{"0", false},
-		{"false", false},
-		{"no", false},
-	}
-	for _, tt := range tests {
-		setBypassEnv(t, tt.val)
-		if got := resourceAuthzBypass(); got != tt.want {
-			t.Errorf("HEARTH_RESOURCE_AUTHZ_BYPASS=%q got %v; want %v", tt.val, got, tt.want)
-		}
-	}
-}
-
-// TestHandleResourceInvoke_BypassSkipsAuthz verifies the bypass
-// env path doesn't hit the WS at all — even if the configured
-// authzWS would deny, the invoke proceeds straight to the plugin.
-func TestHandleResourceInvoke_BypassSkipsAuthz(t *testing.T) {
-	setBypassEnv(t, "1")
-
-	// A deny stub: if the bypass is honored, it must never be called.
-	ws := denyAuthzWS("would have been denied")
-	d := newSupervisedDaemonWithAuthz(t, ws)
-
-	resp := ipcRoundTrip(t, d, ipcRequest{
-		Type:                 "resource_invoke",
-		ResourceConnectionID: "echo-test",
-		ResourceVerb:         "echo",
-		ResourceArgs:         json.RawMessage(`{"hi":"there"}`),
-	})
-	if resp.Type != "resource_invoke_response" {
-		t.Fatalf("Type=%q Message=%q; want resource_invoke_response", resp.Type, resp.Message)
-	}
-	if resp.ResourceStdout != `{"hi":"there"}` {
-		t.Errorf("Stdout = %q", resp.ResourceStdout)
-	}
-	if len(ws.calls) != 0 {
-		t.Errorf("bypass should have skipped the WS; got %d calls", len(ws.calls))
-	}
-}
-
-// TestHandleResourceInvoke_BypassWithOfflineWS confirms the bypass
-// also short-circuits the IsConnected check. This is the
-// dogfooding-without-server use case: nil/offline WS would normally
-// return ErrUnavailable, but with bypass on the invoke proceeds.
-func TestHandleResourceInvoke_BypassWithOfflineWS(t *testing.T) {
-	setBypassEnv(t, "1")
-	d := newSupervisedDaemonWithAuthz(t, &fakeAuthzWS{CanConnect: false})
-
-	resp := ipcRoundTrip(t, d, ipcRequest{
-		Type:                 "resource_invoke",
-		ResourceConnectionID: "echo-test",
-		ResourceVerb:         "echo",
-	})
-	if resp.Type != "resource_invoke_response" {
-		t.Fatalf("Type=%q; want resource_invoke_response", resp.Type)
-	}
-}
 
 func TestHandleResourceInvoke_AgentPrincipalForwarded(t *testing.T) {
 	ws := allowAuthzWS()

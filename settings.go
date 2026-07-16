@@ -81,29 +81,52 @@ func isHearthInstructionFile(content string) bool {
 	return strings.Contains(content, "<!-- hearth -->")
 }
 
-// appendSkillToInstructionFile appends the skill body (YAML frontmatter
-// stripped) to an existing hearth-owned instruction file at instrPath.
-// The section is delimited by a <!-- hearth-skill:<connectionID> --> marker
-// so repeated calls for the same connection are idempotent (skipped).
+// appendSkillToInstructionFile installs the skill body (YAML frontmatter
+// stripped) into an existing hearth-owned instruction file at instrPath.
+// The section is delimited by a <!-- hearth-skill:<connectionID> --> marker.
 // If instrPath doesn't exist or isn't a hearth file, this is a no-op.
+//
+// The marked section is entirely hearth-owned (the plugin's skill.md is the
+// source of truth, not a user document). So when the section already exists we
+// replace it in place if the plugin's skill body changed — a plugin upgrade
+// shipping a fixed skill must reach an agent that already holds the old one,
+// which is the whole point of re-running this on every (re)spawn — and no-op
+// when it's byte-identical to avoid needless rewrites.
 func appendSkillToInstructionFile(instrPath, connectionID, pluginSlug string, skillContent []byte) error {
 	existing, err := os.ReadFile(instrPath)
 	if err != nil || !isHearthInstructionFile(string(existing)) {
 		return nil
 	}
-	marker := "<!-- hearth-skill:" + connectionID + " -->"
-	if strings.Contains(string(existing), marker) {
-		return nil // already installed
-	}
+	content := string(existing)
 	body := stripYAMLFrontmatter(skillContent)
-	section := "\n" + marker + "\n\n## " + pluginSlug + " (" + connectionID + ")\n\n" + strings.TrimSpace(string(body)) + "\n"
-	f, err := os.OpenFile(instrPath, os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
+	section := "\n<!-- hearth-skill:" + connectionID + " -->\n\n## " + pluginSlug + " (" + connectionID + ")\n\n" + strings.TrimSpace(string(body)) + "\n"
+
+	// The section always lands on disk preceded by its leading "\n", so match
+	// on the newline-prefixed marker to find its true span.
+	markerNL := "\n<!-- hearth-skill:" + connectionID + " -->"
+	idx := strings.Index(content, markerNL)
+	if idx < 0 {
+		// Not present yet — append.
+		f, err := os.OpenFile(instrPath, os.O_APPEND|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.WriteString(section)
 		return err
 	}
-	defer f.Close()
-	_, err = f.WriteString(section)
-	return err
+	// Already installed — replace the section in place, preserving any later
+	// skill sections and their order. The section runs from its leading "\n"
+	// up to the next hearth-skill marker (or EOF).
+	end := len(content)
+	if n := strings.Index(content[idx+len(markerNL):], "\n<!-- hearth-skill:"); n >= 0 {
+		end = idx + len(markerNL) + n
+	}
+	updated := content[:idx] + section + content[end:]
+	if updated == content {
+		return nil // already up to date
+	}
+	return os.WriteFile(instrPath, []byte(updated), 0o644)
 }
 
 // stripSkillFromInstructionFile removes a previously-appended hearth-skill
