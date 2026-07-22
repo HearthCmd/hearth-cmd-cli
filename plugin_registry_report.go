@@ -44,6 +44,13 @@ type reportedPluginInstall struct {
 	// AuthScheme is the manifest's auth_scheme value. Informational;
 	// stored on plugin_installs for the install wizard badge.
 	AuthScheme string `json:"auth_scheme,omitempty"`
+	// CatalogVersion and ContentHashes record which catalog release this
+	// install came from and the hashes it was verified against at install
+	// time. Both empty for local-archive installs, which genuinely have no
+	// catalog origin. Provenance for audit — never a trust input, since
+	// verification already happened on this host before the files landed.
+	CatalogVersion string          `json:"catalog_version,omitempty"`
+	ContentHashes  json.RawMessage `json:"content_hashes,omitempty"`
 }
 
 // reportPluginInstallsAtBoot pushes the local plugin registry's
@@ -101,6 +108,20 @@ func (d *Daemon) reportPluginInstallsAtBoot() {
 				log.Printf("daemon: report_plugin_installs marshal credential_specs for %s: %v", m.PluginSlug, err)
 			}
 		}
+		var catalogVersion string
+		var contentHashes json.RawMessage
+		if m.Provenance != nil {
+			catalogVersion = m.Provenance.CatalogVersion
+			if len(m.Provenance.ContentHashes) > 0 {
+				// Same best-effort posture as the fields above: ship the
+				// install without hashes rather than failing the report.
+				if b, err := json.Marshal(m.Provenance.ContentHashes); err == nil {
+					contentHashes = b
+				} else {
+					log.Printf("daemon: report_plugin_installs marshal content_hashes for %s: %v", m.PluginSlug, err)
+				}
+			}
+		}
 		out = append(out, reportedPluginInstall{
 			PluginSlug:      m.PluginSlug,
 			DisplayName:     m.DisplayName,
@@ -111,6 +132,8 @@ func (d *Daemon) reportPluginInstallsAtBoot() {
 			Source:          m.Source,
 			CredentialSpecs: credentialSpecs,
 			AuthScheme:      m.AuthScheme,
+			CatalogVersion:  catalogVersion,
+			ContentHashes:   contentHashes,
 		})
 	}
 	payload, err := json.Marshal(reportPluginInstallsReq{Plugins: out})

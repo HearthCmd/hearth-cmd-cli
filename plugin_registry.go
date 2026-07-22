@@ -73,6 +73,18 @@ func (r *PluginRegistry) Load(dir string) error {
 		topName := entry.Name()
 		topDir := filepath.Join(dir, topName)
 
+		// Skip dot-prefixed entries. `.install-<pid>` staging directories
+		// live here and each contains a manifest.yaml, and stagePluginArchive
+		// deliberately leaves them behind on an unexpected error "so the
+		// operator can inspect it". Without this skip, one such leftover is
+		// loaded as slug ".install-123", fails the slug-must-equal-path
+		// invariant, and takes the WHOLE registry down with it — a single
+		// interrupted install would silently darken every plugin on the host
+		// until someone deleted the directory by hand.
+		if strings.HasPrefix(topName, ".") {
+			continue
+		}
+
 		fi, err := os.Stat(topDir)
 		if err != nil || !fi.IsDir() {
 			continue
@@ -152,9 +164,12 @@ func loadInstall(rootDir, relSlug string) (PluginManifest, error) {
 	if relSlug != m.PluginSlug {
 		return PluginManifest{}, fmt.Errorf("plugin %s: directory path does not match manifest.plugin_slug=%q", relSlug, m.PluginSlug)
 	}
-	if m.MinDaemonVersion != "" && !semverGTE(version, m.MinDaemonVersion) {
-		return PluginManifest{}, fmt.Errorf("plugin %s requires daemon >= %s (this binary is %q); upgrade hearth to use this plugin",
-			relSlug, m.MinDaemonVersion, version)
+	// Backstop. The primary check is at install time (handlePluginInstall),
+	// which refuses before anything lands on disk. This one catches installs
+	// that bypassed the CLI — hand-copied directories, or a plugin that was
+	// fine until the operator downgraded the binary underneath it.
+	if reason := checkMinDaemonVersion(version, m.MinDaemonVersion); reason != "" {
+		return PluginManifest{}, fmt.Errorf("plugin %s %s", relSlug, reason)
 	}
 
 	absDir, absErr := filepath.Abs(installDir)
@@ -163,6 +178,7 @@ func loadInstall(rootDir, relSlug string) (PluginManifest, error) {
 	}
 	m.SourceDir = absDir
 	m.Source = ClassifyManifestSource(m)
+	m.Provenance = readPluginProvenance(installDir)
 
 	if len(m.Verbs) == 0 {
 		log.Printf("plugin %s: zero verbs declared (degenerate but legitimate)", relSlug)

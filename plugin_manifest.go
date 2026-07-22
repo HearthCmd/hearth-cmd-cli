@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -32,6 +33,47 @@ func manifestSchemaSupported(v int) bool {
 		}
 	}
 	return false
+}
+
+// checkMinDaemonVersion reports whether this binary satisfies a manifest's
+// min_daemon_version floor. Returns a non-empty reason when it does not.
+//
+// Two compatibility axes exist and answer different questions.
+// manifest_schema asks "can this binary *parse* this document"; it is
+// checked in ValidateManifest. min_daemon_version asks "does this binary
+// have the *runtime feature* this plugin needs" — e.g. google_drive_oauth
+// v0.1.3 templates `{{args.x || config.y || "lit"}}`, and a binary without
+// the `||` coalesce operator reads that as a broken path and errors at verb
+// time rather than at install.
+//
+// Deliberately fails OPEN on an unparseable daemon version. Dev and local
+// builds inject "dev" (scripts/cli/cli-build.sh), and a developer should not
+// be unable to load plugins — the cost of a wrong answer here is local
+// confusion, not a security breach. This is the opposite of the server's
+// version gate, which is fail-CLOSED because there an unparseable version is
+// not evidence that a client meets a security floor. The asymmetry is
+// intentional; see docs/plugin-distribution-plan.md §3.3.
+//
+// A malformed floor in the manifest is *not* tolerated here — ValidateManifest
+// rejects it, so by this point the floor is known-parseable.
+func checkMinDaemonVersion(daemonVersion, floor string) string {
+	if floor == "" {
+		return ""
+	}
+	if semverParts(daemonVersion) == nil {
+		// Unrecognizable own-version: dev build. Warn, allow. log.Printf
+		// rather than stderr because every caller runs inside the daemon —
+		// the operator sees daemon.log, not this process's stderr.
+		log.Printf("plugin compat: manifest requires hearth >= %s but this binary reports %q "+
+			"(not a release build); allowing. A release binary would be checked.",
+			floor, daemonVersion)
+		return ""
+	}
+	if !semverGTE(daemonVersion, floor) {
+		return fmt.Sprintf("requires hearth >= %s (this binary is %s); run `hearth update`",
+			floor, daemonVersion)
+	}
+	return ""
 }
 
 // PluginManifest is the parsed shape of a plugin install's
@@ -122,6 +164,13 @@ type PluginManifest struct {
 	// server so plugin_installs.source stays in sync. See
 	// hearth-cmd/docs/ha-yaml-adapter-plan.md.
 	Source string `yaml:"-"`
+
+	// Provenance records which catalog release this install came from and
+	// the hashes it was verified against. Read from .provenance.json at
+	// load time; nil for local-archive installs, which have no catalog
+	// origin. Reported to the server for audit. Never a trust input —
+	// verification already happened at install time, against the index.
+	Provenance *PluginProvenance `yaml:"-"`
 }
 
 // SourceBinary marks subprocess plugins; SourceDeclarative marks
@@ -134,8 +183,8 @@ const (
 // AuthScheme values for PluginManifest.AuthScheme.
 const (
 	AuthSchemeServiceAccount = "service_account" // Google-style service account JSON key + domain-wide delegation
-	AuthSchemeOAuth2User     = "oauth2_user"      // per-user OAuth2 flow; credentials stored as connection_identity
-	AuthSchemeAPIKey         = "api_key"          // static API key per identity
+	AuthSchemeOAuth2User     = "oauth2_user"      // OAuth2 flow; the resulting token is the connection's credential
+	AuthSchemeAPIKey         = "api_key"          // static API key, pasted once per connection
 	AuthSchemeNone           = "none"             // no credentials required
 )
 
@@ -392,6 +441,13 @@ func ValidateManifest(m PluginManifest) error {
 	if !manifestSchemaSupported(m.ManifestSchema) {
 		return fmt.Errorf("manifest: manifest_schema=%d not supported by this binary (supported: %v)",
 			m.ManifestSchema, supportedManifestSchemas)
+	}
+	// A floor we can't parse is an authoring bug, and silently ignoring it
+	// would mean a plugin declaring a requirement that never gets enforced.
+	// Strict here so checkMinDaemonVersion can trust the value.
+	if m.MinDaemonVersion != "" && semverParts(m.MinDaemonVersion) == nil {
+		return fmt.Errorf("manifest: min_daemon_version %q is not a parseable version (want MAJOR.MINOR.PATCH, e.g. \"1.0.3\")",
+			m.MinDaemonVersion)
 	}
 	if m.DisplayName == "" {
 		return fmt.Errorf("manifest: display_name is required")

@@ -184,8 +184,10 @@ func mapOrEmpty(m map[string]any) map[string]any {
 // substitute walks `template` and replaces every {{path.dotted}}
 // occurrence with the corresponding value from scope. Unknown paths
 // are errors (templates that silently render empty hide configuration
-// bugs). Double-braces don't nest; the inner content is literal until
-// the matching `}}`. Whitespace inside the braces is trimmed.
+// bugs) — unless a coalesce operator (||) provides a fallback; see
+// evalTemplateExpr. Double-braces don't nest; the inner content is
+// literal until the matching `}}`. Whitespace inside the braces is
+// trimmed.
 //
 // Stringification:
 //   - string → as-is
@@ -236,16 +238,64 @@ var templateFuncs = map[string]func(string) string{
 	"domain": entityIDDomain,
 }
 
-// evalTemplateExpr evaluates the contents of one {{ ... }} pair. Two
-// shapes are accepted:
+// errTemplatePathNotSet marks a {{path}} whose key is absent from scope.
+// It is distinguished from other template errors so the coalesce operator
+// (||) can fall through to the next term on a missing key while still
+// hard-failing on a genuine misuse (non-scalar value, unknown function,
+// or descent into a scalar).
+var errTemplatePathNotSet = errors.New("template path not set")
+
+// evalTemplateExpr evaluates the contents of one {{ ... }} pair. Shapes:
 //
-//	dotted.path        — look up in scope, stringify
-//	funcname(dotted)   — look up dotted, apply funcname (templateFuncs)
+//	dotted.path            — look up in scope, stringify
+//	funcname(dotted)       — look up dotted, apply funcname (templateFuncs)
+//	"literal"              — a double-quoted string literal, taken verbatim
+//	a || b || "fallback"   — coalesce: the first term that resolves to a
+//	                         non-empty value wins; a quoted literal always
+//	                         resolves. An unset key or an empty value falls
+//	                         through to the next term.
 //
-// Unknown function names and missing paths are errors. The function
-// always receives the dotted lookup as a string scalar — non-scalar
-// inputs error before the function runs.
+// The coalesce form is what lets optional config participate in a template
+// without the hard "not set" error — e.g. default a folder arg to the
+// connection's configured base folder, then to Drive's root:
+//
+//	{{args.parent_id || config.root_folder_id || "root"}}
+//
+// Unknown function names and non-scalar values are always errors; a missing
+// path is an error only for a lone (non-coalesce) term.
 func evalTemplateExpr(scope map[string]any, expr string) (string, error) {
+	terms := splitCoalesce(expr)
+	if len(terms) == 1 {
+		return evalSingleExpr(scope, terms[0])
+	}
+	for _, t := range terms {
+		// A quoted literal always resolves (even if empty) and stops the
+		// chain — its intended use is a guaranteed final fallback.
+		if lit, ok := stringLiteral(t); ok {
+			return lit, nil
+		}
+		v, err := evalSingleExpr(scope, t)
+		if err != nil {
+			if errors.Is(err, errTemplatePathNotSet) {
+				continue // unset key → try the next term
+			}
+			return "", err // non-scalar / unknown func → a real bug, don't mask it
+		}
+		if v == "" {
+			continue // empty value → treat as unset for coalesce purposes
+		}
+		return v, nil
+	}
+	return "", fmt.Errorf("template expr %q: no coalesce term resolved to a non-empty value", expr)
+}
+
+// evalSingleExpr evaluates one term: a quoted literal, a funcname(path)
+// call, or a dotted path. The function always receives the dotted lookup
+// as a string scalar — non-scalar inputs error before the function runs.
+func evalSingleExpr(scope map[string]any, expr string) (string, error) {
+	if lit, ok := stringLiteral(expr); ok {
+		return lit, nil
+	}
 	if i := strings.Index(expr, "("); i >= 0 {
 		if !strings.HasSuffix(expr, ")") {
 			return "", fmt.Errorf("template expr %q: unbalanced parentheses", expr)
@@ -277,6 +327,41 @@ func evalTemplateExpr(scope map[string]any, expr string) (string, error) {
 	return s, nil
 }
 
+// splitCoalesce splits an expression on top-level "||", leaving any "||"
+// inside a quoted literal alone. A single-element result means no coalesce
+// operator was present.
+func splitCoalesce(expr string) []string {
+	var terms []string
+	var cur strings.Builder
+	inQuote := false
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch {
+		case c == '"':
+			inQuote = !inQuote
+			cur.WriteByte(c)
+		case !inQuote && c == '|' && i+1 < len(expr) && expr[i+1] == '|':
+			terms = append(terms, strings.TrimSpace(cur.String()))
+			cur.Reset()
+			i++ // consume the second '|'
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	terms = append(terms, strings.TrimSpace(cur.String()))
+	return terms
+}
+
+// stringLiteral reports whether s is a double-quoted literal and, if so,
+// returns its unquoted contents. No escape processing — manifest literals
+// are simple tokens like "root".
+func stringLiteral(s string) (string, bool) {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return s[1 : len(s)-1], true
+	}
+	return s, false
+}
+
 func lookupPath(scope map[string]any, path string) (any, error) {
 	parts := strings.Split(path, ".")
 	var cur any = scope
@@ -287,7 +372,7 @@ func lookupPath(scope map[string]any, path string) (any, error) {
 		}
 		next, found := m[p]
 		if !found {
-			return nil, fmt.Errorf("template path %q: %s not set", path, strings.Join(parts[:idx+1], "."))
+			return nil, fmt.Errorf("template path %q: %s not set: %w", path, strings.Join(parts[:idx+1], "."), errTemplatePathNotSet)
 		}
 		cur = next
 	}

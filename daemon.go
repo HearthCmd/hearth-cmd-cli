@@ -83,6 +83,20 @@ type ipcRequest struct {
 	PluginUpgrade     bool   `json:"plugin_upgrade,omitempty"`
 	PluginForce       bool   `json:"plugin_force,omitempty"`
 
+	// Catalog install. The daemon does the fetching, not the CLI: it is
+	// the source of truth for what is installed, and phase 3 drives this
+	// same path from the phone, where there is no CLI process at all.
+	// PluginCatalogVersion is an assertion ("install exactly this, or tell
+	// me the catalog moved on"), not a historical lookup.
+	PluginCatalogSlug    string `json:"plugin_catalog_slug,omitempty"`
+	PluginCatalogVersion string `json:"plugin_catalog_version,omitempty"`
+	// PluginAllowBreaking consents to an update that removes verbs or adds
+	// required config. Separate from PluginUpgrade on purpose: "replace this
+	// version" and "and I accept that existing permission rules will stop
+	// matching" are different decisions, and only the second one surprises
+	// people.
+	PluginAllowBreaking bool `json:"plugin_allow_breaking,omitempty"`
+
 	// `hearth hh approve` CLI plumbing — approver-resolution phase 5b.
 	// Forwarded to the server as tool_approve_permission_request when
 	// the IPC caller derives to an agent principal; as a regular
@@ -800,8 +814,31 @@ func (d *Daemon) Shutdown() {
 	}
 
 	close(d.done)
+
+	// Deliberately does NOT os.Remove(d.sockPath).
+	//
+	// Unlinking a path is not the same as releasing the thing you bound to
+	// it. A graceful shutdown can take seconds — it drains agents, flushes
+	// pid_status over the WS, and closes a socket that may be mid-reconnect
+	// backoff — and a replacement daemon started in that window binds a NEW
+	// socket at the same path. The unlink then deletes the new daemon's
+	// socket, leaving a live daemon that nothing can reach over IPC.
+	//
+	// Observed 2026-07-21: `kill <pid>` followed promptly by `hearth start`
+	// produced a running daemon with no socket. `hearth stop` reported "host
+	// is already stopped" (its dial failed), and `hearth login` silently
+	// failed to deliver reload_credentials, so the daemon kept using stale
+	// credentials and 401'd against the relay for half an hour with the
+	// correct credentials sitting on disk.
+	//
+	// Nothing needs the removal: startDaemon already does os.Remove(sockPath)
+	// before net.Listen, so a leftover socket from any exit — graceful,
+	// crashed, or SIGKILLed — is cleaned by the next start. And a stale
+	// socket file with no listener refuses connections, which is exactly
+	// what callers already treat as "not running".
+	//
+	// Closing the listener is what actually stops serving.
 	d.listener.Close()
-	os.Remove(d.sockPath)
 }
 
 // handleUpdateShutdown handles the update_shutdown IPC request.
@@ -1030,6 +1067,13 @@ func (d *Daemon) startDaemonWS() {
 		log.Printf("daemon: agent_resource_grants_changed received, refetching")
 		go d.fetchAgentResourceGrantsAtBoot()
 	}
+	// App-initiated plugin install: the phone asked the relay, the relay
+	// authorized it and pushed the command here. Runs the same install path
+	// as `hearth plugin install` — this host still fetches and verifies
+	// against its own pinned key — and reports the outcome back.
+	d.daemonWS.installPluginFunc = func(slug, version string, upgrade, force, allowBreaking bool) {
+		d.installPluginFromServer(slug, version, upgrade, force, allowBreaking)
+	}
 
 	go d.daemonWS.Run()
 
@@ -1251,6 +1295,8 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		d.handlePluginInstall(conn, req)
 	case "plugin_uninstall":
 		d.handlePluginUninstall(conn, req)
+	case "plugin_rollback":
+		d.handlePluginRollback(conn, req)
 	case "approve_permission_request":
 		d.handleApprovePermissionRequest(conn, req)
 	case "chat_reply":

@@ -527,7 +527,19 @@ func semverGTE(installed, floor string) bool {
 // components with 0. Returns nil on parse failure of the first three
 // components; trailing junk (e.g. "1.2.3-rc1") is tolerated by parsing
 // the third component up to the first non-digit.
+//
+// A leading "v" is stripped. This is not cosmetic: hearth's own release
+// binaries are built with a v-prefixed version — scripts/build.sh in the
+// public CLI repo force-prefixes it — so "v1.0.2" is the literal content of
+// the `version` global in every shipped binary. Without this strip, every
+// comparison against our own version silently returned "below floor",
+// which is why plugin min_daemon_version had never once worked. Harness
+// versions (claude, codex, …) are also commonly v-prefixed.
 func semverParts(s string) []int {
+	s = strings.TrimSpace(s)
+	if len(s) > 0 && (s[0] == 'v' || s[0] == 'V') {
+		s = s[1:]
+	}
 	parts := strings.SplitN(s, ".", 4)
 	out := []int{0, 0, 0}
 	for i := 0; i < 3 && i < len(parts); i++ {

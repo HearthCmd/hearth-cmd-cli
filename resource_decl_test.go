@@ -102,6 +102,66 @@ func TestSubstitute_UnterminatedBracesError(t *testing.T) {
 	}
 }
 
+func TestSubstitute_CoalesceOperator(t *testing.T) {
+	// The base-folder pattern: prefer an explicit arg, else the
+	// connection's configured folder, else Drive's root.
+	tmpl := `{{args.parent_id || config.root_folder_id || "root"}}`
+	cases := []struct {
+		name   string
+		args   map[string]any
+		config map[string]any
+		want   string
+	}{
+		{"first term wins", map[string]any{"parent_id": "A"}, map[string]any{"root_folder_id": "B"}, "A"},
+		{"falls to config when arg unset", map[string]any{}, map[string]any{"root_folder_id": "B"}, "B"},
+		{"falls to literal when both unset", map[string]any{}, map[string]any{}, "root"},
+		{"empty arg falls through to config", map[string]any{"parent_id": ""}, map[string]any{"root_folder_id": "B"}, "B"},
+		{"empty arg and empty config fall to literal", map[string]any{"parent_id": ""}, map[string]any{"root_folder_id": ""}, "root"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := substitute(tmpl, map[string]any{"args": tc.args, "config": tc.config})
+			if err != nil {
+				t.Fatalf("substitute: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("substitute() = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSubstitute_CoalesceLiteralPreservesPipes(t *testing.T) {
+	// "||" inside a quoted literal must not be treated as an operator.
+	got, err := substitute(`{{args.x || "a||b"}}`, map[string]any{"args": map[string]any{}})
+	if err != nil {
+		t.Fatalf("substitute: %v", err)
+	}
+	if got != "a||b" {
+		t.Errorf("substitute() = %q; want %q", got, "a||b")
+	}
+}
+
+func TestSubstitute_CoalesceAllUnsetNoFallbackIsError(t *testing.T) {
+	_, err := substitute(`{{args.x || config.y}}`, map[string]any{"args": map[string]any{}, "config": map[string]any{}})
+	if err == nil {
+		t.Fatal("expected error when every coalesce term is unset and there is no literal fallback")
+	}
+}
+
+func TestSubstitute_CoalesceWithFunctionTerm(t *testing.T) {
+	// A function term resolves when its path is set...
+	got, err := substitute(`{{domain(args.entity_id) || "none"}}`, map[string]any{"args": map[string]any{"entity_id": "light.kitchen"}})
+	if err != nil || got != "light" {
+		t.Fatalf("substitute(set) = %q, %v; want light", got, err)
+	}
+	// ...and falls through to the literal when the path is unset.
+	got, err = substitute(`{{domain(args.entity_id) || "none"}}`, map[string]any{"args": map[string]any{}})
+	if err != nil || got != "none" {
+		t.Fatalf("substitute(unset) = %q, %v; want none", got, err)
+	}
+}
+
 // ---------- jsonPathExtract() ----------
 
 func TestJSONPath_ScalarLeaf(t *testing.T) {

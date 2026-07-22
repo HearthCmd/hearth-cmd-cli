@@ -68,6 +68,14 @@ type DaemonWS struct {
 	// Like resourceConnectionsChangedFunc, the frame body is
 	// informational; the daemon refetches the full list.
 	agentResourceGrantsChangedFunc func()
+
+	// installPluginFunc fires on a server-pushed install_plugin command
+	// (app-initiated catalog install). The daemon wires it to the same
+	// install path `hearth plugin install` uses and reports the outcome
+	// back. A callback rather than a direct call for the reason stated
+	// above: this layer does not know about plugin state, and should not
+	// start now.
+	installPluginFunc func(slug, version string, upgrade, force, allowBreaking bool)
 }
 
 // agentWS is a per-agent-instance handle to the shared daemon WebSocket.
@@ -301,6 +309,12 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		DestPath string `json:"dest_path"`
 		Filename string `json:"filename"`
 		DataB64  string `json:"data_b64"`
+		// install_plugin fields — app-initiated catalog install.
+		PluginCatalogSlug    string `json:"plugin_catalog_slug"`
+		PluginCatalogVersion string `json:"plugin_catalog_version"`
+		PluginUpgrade        bool   `json:"plugin_upgrade"`
+		PluginForce          bool   `json:"plugin_force"`
+		PluginAllowBreaking  bool   `json:"plugin_allow_breaking"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
@@ -321,6 +335,21 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		delete(d.instances, msg.AIAgentInstanceID)
 		d.mu.Unlock()
 		log.Printf("daemon-ws: retired agent instance %s", msg.AIAgentInstanceID)
+	case "install_plugin":
+		// App-initiated install. The server has already authorized the
+		// request; the daemon still does its own fetching and verifying,
+		// because the trust root is the key compiled into this binary and
+		// nothing the server says can substitute for it.
+		//
+		// Runs on its own goroutine: the install makes a network round trip
+		// to GitHub, and this is the WS read loop. Blocking here would stall
+		// every other frame from the server for the duration.
+		if d.installPluginFunc == nil {
+			log.Printf("daemon-ws: install_plugin received but no handler wired; ignoring")
+			return
+		}
+		go d.installPluginFunc(msg.PluginCatalogSlug, msg.PluginCatalogVersion,
+			msg.PluginUpgrade, msg.PluginForce, msg.PluginAllowBreaking)
 	case "destroy_agent_instance":
 		// Temp-only counterpart to retire: kill, drop, and rm -rf the
 		// working directory. Server passes the path explicitly so we don't
@@ -461,6 +490,15 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		// File relayed from the user's phone. ai_agent_instance_id may be
 		// empty (chat room path) — routeControlFrame doesn't need it for
 		// this type; it only reads dest_path, filename, data_b64.
+		d.routeControlFrame(data)
+		return true
+	case "install_plugin":
+		// App-initiated catalog install. Host-scoped: a plugin belongs to
+		// the host, not to any agent, so this frame carries no
+		// ai_agent_instance_id and MUST be routed here — above the
+		// agent-id guard below, which drops agent-less frames on the
+		// floor without logging. Same trap that swallowed
+		// destroy_agent_instance; see the note on that switch.
 		d.routeControlFrame(data)
 		return true
 	}
