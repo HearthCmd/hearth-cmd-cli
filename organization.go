@@ -19,7 +19,7 @@ import (
 func sendWSRequest(msgType string, data map[string]interface{}) (json.RawMessage, error) {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to daemon: %v\nRun 'hearth start' first", err)
+		return nil, daemonDialError(err)
 	}
 	defer conn.Close()
 
@@ -327,10 +327,10 @@ func printJSON(v json.RawMessage) {
 
 // workingOrgID returns the CLI device's current organization, as stored in
 // io_devices.organization_id on the server. Source of truth is the server,
-// not ~/.hearth/credentials — so a `hearth hh household switch` on one device
-// doesn't need to hop through config to be visible here. Returns "" on any
-// failure; the caller prints a generic "run 'hearth hh household switch'"
-// hint so no error text is lost.
+// not ~/.hearth/credentials — the terminal's household is pinned at enrollment
+// (`hearth login`, whose org is chosen via --org or the login picker), so no
+// config hop is needed to read it here. Returns "" on any failure; the caller
+// prints a friendly hint so no error text is lost.
 func workingOrgID() string {
 	id, _ := workingOrgIDAndSlug()
 	return id
@@ -340,8 +340,11 @@ func workingOrgID() string {
 // with a friendly message when none is set. Distinguishes orphaned
 // (zero memberships) from no-current-chosen (memberships exist but
 // none flagged is_current) so the suggested fix is actually
-// actionable — `hh household create` vs `hh household switch`. Used
-// by every subcommand that needs an org context.
+// actionable — `hh household create` vs re-running `hearth login`.
+// The latter is near-unreachable now that the terminal's household is
+// pinned at enrollment; it only fires if the pinned org later drops
+// out from under the terminal (e.g. the user is removed from it).
+// Used by every subcommand that needs an org context.
 func requireWorkingOrgID() string {
 	deviceID := readConfigValue("io_device_id")
 	if deviceID == "" {
@@ -378,7 +381,7 @@ func requireWorkingOrgID() string {
 	}
 	fmt.Fprintln(os.Stderr,
 		"hearth: no current household set.\n"+
-			"Pick one with: hearth hh household switch")
+			"Re-bind this host with: hearth login <email>")
 	os.Exit(1)
 	return "" // unreachable
 }
@@ -516,7 +519,7 @@ the server validates on the response.`)
 
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hearth hh approve: cannot connect to daemon: %v\nRun 'hearth start' first.\n", err)
+		fmt.Fprintf(os.Stderr, "hearth hh approve: %v\n", daemonDialError(err))
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -585,7 +588,7 @@ Run 'hearth hh <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: hearth hh household <list|get|create|update|delete|switch>\n")
+		fmt.Fprintf(os.Stderr, "Usage: hearth hh household <list|get|create|update|delete>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -657,42 +660,6 @@ func runOrganizationOrg(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
-	case "switch":
-		// Interactive picker scoped to the calling user's memberships, with
-		// a "create new" escape hatch. Source of truth for current org is
-		// io_devices.organization_id on the server — we just send
-		// set_current_organization and the phone + CLI both see the new scope.
-		userID := readConfigValue("user_id")
-		if userID == "" {
-			fmt.Fprintf(os.Stderr, "hearth: not logged in (run 'hearth login <email>' first)\n")
-			os.Exit(1)
-		}
-		deviceID := readConfigValue("io_device_id")
-		if deviceID == "" {
-			fmt.Fprintf(os.Stderr, "hearth: not enrolled (run 'hearth login <email>' first)\n")
-			os.Exit(1)
-		}
-		chosen, err := selectUserOrganization(userID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-			os.Exit(1)
-		}
-		data, err := sendWSRequest("set_current_organization", map[string]interface{}{
-			"io_device_id":    deviceID,
-			"organization_id": chosen,
-		})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-			os.Exit(1)
-		}
-		var resp struct {
-			Error string `json:"error"`
-		}
-		if err := json.Unmarshal(data, &resp); err == nil && resp.Error != "" {
-			fmt.Fprintf(os.Stderr, "hearth: %s\n", resp.Error)
-			os.Exit(1)
-		}
-		fmt.Printf("Current household set to %s.\n", chosen)
 	default:
 		fmt.Fprintf(os.Stderr, "hearth hh household: unknown command %q\n", args[0])
 		os.Exit(1)

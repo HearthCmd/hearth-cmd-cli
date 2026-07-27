@@ -216,7 +216,7 @@ func resolveSecretsViaDaemon(bindings map[string]string) (map[string]string, *Pl
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
 		return nil, &PluginError{Code: ErrTransport,
-			Message: fmt.Sprintf("cannot connect to daemon: %v\nRun 'hearth start' first", err)}
+			Message: daemonDialError(err).Error()}
 	}
 	defer conn.Close()
 

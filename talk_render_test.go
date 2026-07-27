@@ -13,48 +13,106 @@ import (
 // underlying termenv detector treats the non-TTY stdout as monochrome,
 // so we mostly assert with strings.Contains on the visible substring.
 
-func TestParseHearthEnvelope(t *testing.T) {
+func TestParseHearthSegments(t *testing.T) {
 	t.Run("no envelope", func(t *testing.T) {
-		body, name := parseHearthEnvelope("plain message")
-		if body != "plain message" || name != "" {
-			t.Errorf("got body=%q name=%q", body, name)
+		segs := parseHearthSegments("plain message")
+		if len(segs) != 1 || segs[0].body != "plain message" || segs[0].fromName != "" {
+			t.Errorf("got %+v", segs)
 		}
 	})
 
 	t.Run("strips header and extracts from.name", func(t *testing.T) {
 		text := `hearth/1 {"from":{"name":"Bob"}}` + "\n\nactual body"
-		body, name := parseHearthEnvelope(text)
-		if body != "actual body" {
-			t.Errorf("body = %q", body)
-		}
-		if name != "Bob" {
-			t.Errorf("name = %q", name)
+		segs := parseHearthSegments(text)
+		if len(segs) != 1 || segs[0].body != "actual body" || segs[0].fromName != "Bob" {
+			t.Errorf("got %+v", segs)
 		}
 	})
 
 	t.Run("leading whitespace tolerated", func(t *testing.T) {
 		text := "\n  \thearth/1 {\"from\":{\"name\":\"Alice\"}}\n\nhi"
-		body, name := parseHearthEnvelope(text)
-		if body != "hi" || name != "Alice" {
-			t.Errorf("body=%q name=%q", body, name)
+		segs := parseHearthSegments(text)
+		if len(segs) != 1 || segs[0].body != "hi" || segs[0].fromName != "Alice" {
+			t.Errorf("got %+v", segs)
 		}
 	})
 
-	t.Run("malformed (no double-newline) returns input", func(t *testing.T) {
+	t.Run("malformed (no header terminator) returns input", func(t *testing.T) {
 		text := `hearth/1 {"from":{"name":"X"}} no break`
-		body, name := parseHearthEnvelope(text)
-		if body != text || name != "" {
-			t.Errorf("body=%q name=%q", body, name)
+		segs := parseHearthSegments(text)
+		if len(segs) != 1 || segs[0].body != text || segs[0].fromName != "" {
+			t.Errorf("got %+v", segs)
 		}
 	})
 
 	t.Run("unparseable JSON header still yields body, empty name", func(t *testing.T) {
 		text := "hearth/1 {bogus\n\nbody"
-		body, name := parseHearthEnvelope(text)
-		if body != "body" || name != "" {
-			t.Errorf("body=%q name=%q", body, name)
+		segs := parseHearthSegments(text)
+		if len(segs) != 1 || segs[0].fromName != "" {
+			t.Errorf("got %+v", segs)
 		}
 	})
+
+	t.Run("coalesced entry: system_event + two human messages", func(t *testing.T) {
+		// Mirrors the real prod entry Claude merged into one user turn.
+		text := `hearth/1 {"from":{"id":""},"kind":"system_event","event":"resource_granted"}` + "\n\n" +
+			"You have access to G Drive." +
+			`hearth/1 {"from":{"id":"u1","name":"Matt"}}` + "\n\n" +
+			"I just granted you access. try again please" +
+			`hearth/1 {"from":{"id":""},"kind":"system_event","event":"permission_resolved","outcome":"allow"}` + "\n\n" +
+			"Matt approved the Bash request." +
+			`hearth/1 {"from":{"id":"u1","name":"Matt"}}` + "\n\nHey"
+
+		segs := parseHearthSegments(text)
+		if len(segs) != 4 {
+			t.Fatalf("want 4 segments, got %d: %+v", len(segs), segs)
+		}
+		if segs[0].kind != "system_event" || segs[0].event != "resource_granted" ||
+			segs[0].body != "You have access to G Drive." {
+			t.Errorf("seg0 = %+v", segs[0])
+		}
+		if segs[1].kind != "" || segs[1].fromName != "Matt" ||
+			segs[1].body != "I just granted you access. try again please" {
+			t.Errorf("seg1 = %+v", segs[1])
+		}
+		if segs[2].kind != "system_event" || segs[2].event != "permission_resolved" ||
+			segs[2].body != "Matt approved the Bash request." {
+			t.Errorf("seg2 = %+v", segs[2])
+		}
+		if segs[3].kind != "" || segs[3].fromName != "Matt" || segs[3].body != "Hey" {
+			t.Errorf("seg3 = %+v", segs[3])
+		}
+	})
+
+	t.Run("literal hearth/1 { in a body is not a boundary", func(t *testing.T) {
+		text := `hearth/1 {"from":{"name":"Bob"}}` + "\n\n" +
+			"paste this: hearth/1 {not json here} and keep going"
+		segs := parseHearthSegments(text)
+		if len(segs) != 1 || segs[0].body != "paste this: hearth/1 {not json here} and keep going" {
+			t.Errorf("got %+v", segs)
+		}
+	})
+}
+
+func TestRenderUserSegmentsCoalesced(t *testing.T) {
+	// The human messages must render as their own "Matt …" lines; the
+	// resource_granted FYI must not swallow them.
+	text := `hearth/1 {"from":{"id":""},"kind":"system_event","event":"resource_granted"}` + "\n\n" +
+		"You have access to G Drive." +
+		`hearth/1 {"from":{"id":"u1","name":"Matt"}}` + "\n\n" +
+		"I just granted you access. try again please" +
+		`hearth/1 {"from":{"id":"u1","name":"Matt"}}` + "\n\nHey"
+
+	out := renderDecomposedTranscript("user", text, "alice", "", nil, "", "cody")
+	for _, want := range []string{"Matt", "I just granted you access. try again please", "Hey", "resource_granted"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	// The raw hearth/1 header of a later segment must not bleed into the output.
+	if strings.Contains(out, "hearth/1 {") {
+		t.Errorf("raw envelope header leaked into render:\n%s", out)
+	}
 }
 
 func TestUserAndAgentPrefix(t *testing.T) {

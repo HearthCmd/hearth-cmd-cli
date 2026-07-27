@@ -112,16 +112,15 @@ func renderTranscriptEntry(data json.RawMessage, userName, agentName string) str
 func renderDecomposedTranscript(event, text, toolName, message string, toolInput json.RawMessage, userName, agentName string) string {
 	switch event {
 	case "user":
-		body, fromName := parseHearthEnvelope(text)
-		if body == "" {
+		// One entry may hold several coalesced segments (see parseHearthSegments);
+		// render each on its own line so a human message is never hidden behind or
+		// mangled by a leading system_event. Envelope name beats caller-supplied
+		// name (handles multi-user relays).
+		lines := renderUserSegments(text, userName)
+		if len(lines) == 0 {
 			return ""
 		}
-		// Envelope name beats caller-supplied name (handles multi-user relays).
-		name := fromName
-		if name == "" {
-			name = userName
-		}
-		return userPrefix(name) + " " + body
+		return strings.Join(lines, "\n")
 	case "text":
 		if text != "" {
 			if agentName != "" {
@@ -143,27 +142,137 @@ func renderDecomposedTranscript(event, text, toolName, message string, toolInput
 	return ""
 }
 
-// parseHearthEnvelope strips the `hearth/1 {json}\n\n` prefix that the
-// server prepends to user-relayed messages and returns the body plus the
-// sender's display name (from envelope.from.name). Both are empty/unchanged
-// if the input has no envelope.
-func parseHearthEnvelope(text string) (body, fromName string) {
+// hearthSegment is one hearth/1 message parsed out of a (possibly coalesced)
+// user transcript entry.
+type hearthSegment struct {
+	body     string
+	fromName string
+	kind     string // "" for a plain human/agent message; else "system_event", "chat_context", …
+	event    string // populated when kind == "system_event"
+}
+
+// parseHearthSegments splits a user transcript entry into its ordered hearth/1
+// segments. Claude coalesces queued stdin submits into ONE `user` JSONL entry
+// when they pile up while the agent is mid-turn, and the daemon injects each
+// inbound message (human relay_input AND system_events alike) as its own submit
+// — so a single entry can concatenate several `hearth/1 {json}\n\n<body>`
+// envelopes back-to-back with no separator. The merge is lossless, so we split
+// them back out and render each independently; parsing only the first envelope
+// (as the old parseHearthEnvelope did) mis-attributed the whole blob to its
+// leading segment and mangled the human messages concatenated behind it. Text
+// with no envelope returns a single segment carrying the raw text.
+func parseHearthSegments(text string) []hearthSegment {
+	const prefix = "hearth/1 "
 	t := strings.TrimLeft(text, " \t\r\n")
-	if !strings.HasPrefix(t, "hearth/1 ") {
-		return text, ""
+	if !strings.HasPrefix(t, prefix) {
+		return []hearthSegment{{body: text}}
 	}
-	idx := strings.Index(t, "\n\n")
-	if idx < 0 {
-		return text, ""
+	var segs []hearthSegment
+	i := 0
+	for i < len(t) {
+		nlRel := strings.Index(t[i:], "\n")
+		if nlRel < 0 {
+			// No header terminator — not a real envelope; take the remainder raw.
+			segs = append(segs, hearthSegment{body: t[i:]})
+			break
+		}
+		nl := i + nlRel
+		var hdr struct {
+			From struct {
+				Name string `json:"name"`
+			} `json:"from"`
+			Kind  string `json:"kind"`
+			Event string `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(t[i+len(prefix):nl]), &hdr); err != nil {
+			segs = append(segs, hearthSegment{body: t[i:]})
+			break
+		}
+		// Body starts after the header line, skipping the optional blank line.
+		bodyStart := nl + 1
+		if bodyStart < len(t) && t[bodyStart] == '\n' {
+			bodyStart++
+		}
+		// Coalesced segments are concatenated with no separator, so this body
+		// runs until the next VALID hearth/1 header (or end of text).
+		next := nextSegmentStart(t, bodyStart)
+		bodyEnd := len(t)
+		if next >= 0 {
+			bodyEnd = next
+		}
+		segs = append(segs, hearthSegment{body: t[bodyStart:bodyEnd], fromName: hdr.From.Name, kind: hdr.Kind, event: hdr.Event})
+		if next < 0 {
+			break
+		}
+		i = next
 	}
-	headerJSON := t[len("hearth/1 "):idx]
-	var hdr struct {
-		From struct {
-			Name string `json:"name"`
-		} `json:"from"`
+	if len(segs) == 0 {
+		return []hearthSegment{{body: text}}
 	}
-	_ = json.Unmarshal([]byte(headerJSON), &hdr)
-	return t[idx+2:], hdr.From.Name
+	return segs
+}
+
+// nextSegmentStart returns the index of the next `hearth/1 {…}` whose header
+// line parses as JSON, at or after `from`. Validating the JSON (not just the
+// literal) keeps a body that happens to contain "hearth/1 {" from being taken
+// as a boundary.
+func nextSegmentStart(text string, from int) int {
+	const prefix = "hearth/1 "
+	const mark = "hearth/1 {"
+	for pos := from; pos < len(text); {
+		rel := strings.Index(text[pos:], mark)
+		if rel < 0 {
+			return -1
+		}
+		idx := pos + rel
+		if nlRel := strings.Index(text[idx:], "\n"); nlRel > 0 {
+			nl := idx + nlRel
+			if json.Valid([]byte(text[idx+len(prefix) : nl])) {
+				return idx
+			}
+		}
+		pos = idx + 1
+	}
+	return -1
+}
+
+// renderUserSegments renders every hearth/1 segment of a user transcript entry
+// as its own line: human/agent messages as "<name> <body>", system_events as a
+// faint one-line note, chat_context scaffolding skipped. Returns nil when
+// nothing is renderable. Unlike the phone app the TUI has no show-system
+// toggle, so system_events render faint rather than being hidden — a power-user
+// surface benefits from seeing them and there'd be no way to reveal them.
+func renderUserSegments(text, userName string) []string {
+	var lines []string
+	for _, seg := range parseHearthSegments(text) {
+		switch seg.kind {
+		case "system_event":
+			lines = append(lines, renderSystemSegment(seg))
+		case "chat_context":
+			// injected agent scaffolding — not part of the human conversation
+		default:
+			body := strings.TrimSpace(seg.body)
+			if body == "" {
+				continue
+			}
+			name := seg.fromName
+			if name == "" {
+				name = userName
+			}
+			lines = append(lines, userPrefix(name)+" "+body)
+		}
+	}
+	return lines
+}
+
+// renderSystemSegment renders a hearth/1 system_event segment as a faint line,
+// labeled by its event name (falling back to a truncated body).
+func renderSystemSegment(seg hearthSegment) string {
+	label := seg.event
+	if label == "" {
+		label = truncate(strings.TrimSpace(seg.body), 60)
+	}
+	return activityStyle.Render("· " + label)
 }
 
 // userPrefix renders the leading label for a user-attributed line.
@@ -215,15 +324,7 @@ func renderClaudeBlocks(role string, blocks []contentBlock, userName, agentName 
 				continue
 			}
 			if role == "user" {
-				body, fromName := parseHearthEnvelope(text)
-				if body == "" {
-					continue
-				}
-				name := fromName
-				if name == "" {
-					name = userName
-				}
-				lines = append(lines, userPrefix(name)+" "+body)
+				lines = append(lines, renderUserSegments(text, userName)...)
 			} else {
 				if agentName != "" {
 					lines = append(lines, agentPrefix(agentName)+" "+text)
@@ -258,15 +359,11 @@ func renderClaudeText(role, text, userName, agentName string) string {
 		return ""
 	}
 	if role == "user" {
-		body, fromName := parseHearthEnvelope(text)
-		if body == "" {
+		lines := renderUserSegments(text, userName)
+		if len(lines) == 0 {
 			return ""
 		}
-		name := fromName
-		if name == "" {
-			name = userName
-		}
-		return userPrefix(name) + " " + body
+		return strings.Join(lines, "\n")
 	}
 	if agentName != "" {
 		return agentPrefix(agentName) + " " + text

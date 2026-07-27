@@ -205,107 +205,6 @@ func selectAIBrainModel(orgID string) (string, error) {
 }
 
 // =============================================================================
-// selectUserOrganization — picker scoped to one human user's memberships
-// =============================================================================
-
-// selectUserOrganization fetches every organization the given user belongs to
-// (joined via organization_human_users) and renders an interactive picker. A
-// "→ Create new…" row at the bottom drops the user into the create flow,
-// which both creates the org and adds the user as its owner in one step.
-func selectUserOrganization(userID string) (string, error) {
-	if userID == "" {
-		return "", fmt.Errorf("user_id required")
-	}
-	data, err := sendWSRequest("list_organizations", map[string]interface{}{"for_human_user_id": userID})
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch organizations: %w", err)
-	}
-
-	var resp struct {
-		Organizations []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"organizations"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return "", fmt.Errorf("failed to parse organizations: %w", err)
-	}
-	if resp.Error != "" {
-		return "", fmt.Errorf("list organizations: %s", resp.Error)
-	}
-
-	if len(resp.Organizations) == 0 {
-		fmt.Println("You don't belong to any households yet. Let's create one.")
-		return createUserOrganizationInteractive(userID)
-	}
-
-	items := make([]selectItem[string], len(resp.Organizations))
-	for i, o := range resp.Organizations {
-		items[i] = selectItem[string]{Label: o.Name, ID: o.ID}
-	}
-	items = append(items, selectItem[string]{Label: "→ Create new…", ID: sentinelCreateNew})
-
-	id, err := selectFromList("Household", items)
-	if err != nil {
-		return "", err
-	}
-	if id == sentinelCreateNew {
-		return createUserOrganizationInteractive(userID)
-	}
-	return id, nil
-}
-
-// createUserOrganizationInteractive prompts for an org name, creates the row,
-// and adds the given user as its owner.
-func createUserOrganizationInteractive(userID string) (string, error) {
-	if userID == "" {
-		return "", fmt.Errorf("user_id required")
-	}
-	reader := bufio.NewReader(os.Stdin)
-	name := promptLine(reader, "Name: ")
-	if name == "" {
-		return "", fmt.Errorf("name required")
-	}
-
-	createData, err := sendWSRequest("create_organization", map[string]interface{}{"name": name})
-	if err != nil {
-		return "", fmt.Errorf("failed to create household: %w", err)
-	}
-	var createResp struct {
-		Organization struct {
-			ID string `json:"id"`
-		} `json:"organization"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(createData, &createResp); err != nil {
-		return "", fmt.Errorf("failed to parse create response: %w", err)
-	}
-	if createResp.Error != "" {
-		return "", fmt.Errorf("create household: %s", createResp.Error)
-	}
-	orgID := createResp.Organization.ID
-
-	addData, err := sendWSRequest("add_organization_member", map[string]interface{}{
-		"organization_id": orgID,
-		"human_user_id":   userID,
-		"role":            "owner",
-	})
-	if err != nil {
-		return "", fmt.Errorf("created household %s but failed to add owner membership: %w", orgID, err)
-	}
-	var addResp struct {
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(addData, &addResp); err == nil && addResp.Error != "" {
-		return "", fmt.Errorf("created household %s but failed to add owner membership: %s", orgID, addResp.Error)
-	}
-
-	fmt.Printf("Created household %s.\n", orgID)
-	return orgID, nil
-}
-
-// =============================================================================
 // selectAgentJobDescription
 // =============================================================================
 
@@ -399,7 +298,7 @@ func createAgentJobDescriptionInteractive(orgID string) (string, error) {
 		orgID = workingOrgID()
 	}
 	if orgID == "" {
-		return "", fmt.Errorf("no current household set (run 'hearth hh household switch')")
+		return "", fmt.Errorf("no current household set (re-bind this host with 'hearth login <email>')")
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -447,7 +346,7 @@ func findOrCreateWorkingDirectoryByPath(orgID, hostID, positionName string) (str
 		orgID = workingOrgID()
 	}
 	if orgID == "" {
-		return "", fmt.Errorf("no current household set (run 'hearth hh household switch')")
+		return "", fmt.Errorf("no current household set (re-bind this host with 'hearth login <email>')")
 	}
 	if hostID == "" {
 		hostID = readConfigValue("host_id")
@@ -548,7 +447,7 @@ func createOrganizationPositionInteractive(orgID, hostID string) (string, error)
 		orgID = workingOrgID()
 	}
 	if orgID == "" {
-		return "", fmt.Errorf("no current household set (run 'hearth hh household switch')")
+		return "", fmt.Errorf("no current household set (re-bind this host with 'hearth login <email>')")
 	}
 
 	// Positions no longer have names of their own — the linked JD's

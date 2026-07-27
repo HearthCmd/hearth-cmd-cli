@@ -109,7 +109,7 @@ func (codexHarness) PostSubmit(_ *os.Process) error { return nil }
 // codex's Rust binary still lives in setupInterpose (lifecycle-coupled
 // to the interpose chunk); not absorbed here yet.
 func (codexHarness) PreSpawn(ctx HarnessCtx) error {
-	return installHearthInstructions("codex", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd)
+	return installHearthInstructions("codex", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd, ctx.HearthPromptBody)
 }
 
 func (codexHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {

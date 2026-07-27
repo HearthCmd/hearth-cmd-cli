@@ -263,6 +263,16 @@ func (m talkModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case wsConnectedMsg:
 		m.status = "Connected"
+		// Every (re)connect starts with an EMPTY server-side subscriber set
+		// for this device — the server drops all subscriptions when the socket
+		// closes. Our `subscribed` map is now stale: applyInstances would see
+		// subscribed[id]==true and skip re-sending subscribe_agent, so the
+		// server would fan no transcript_entry/activity_event to us and the
+		// TUI would silently freeze after the first reconnect. Clear it; the
+		// ai_agent_instances_list the server pushes on connect then drives
+		// applyInstances to re-subscribe every visible instance (this mirrors
+		// the web client's re-subscribe in ws.ts onopen).
+		m.subscribed = map[string]bool{}
 
 	case wsDisconnectedMsg:
 		m.status = "Disconnected: " + msg.err
@@ -389,9 +399,14 @@ func (m *talkModel) handleServerMessage(data []byte) {
 		// Sniff any envelope-prefixed user text for a from.name and cache
 		// it as the local user's display label. This piggybacks on history
 		// replay so the local echo gets a real name without an extra fetch.
+		// A coalesced entry can lead with a nameless system_event, so scan its
+		// segments for the first human message (kind == "") carrying a name.
 		if msg.Event == "user" && msg.Text != "" && m.selfUserName == "" {
-			if _, name := parseHearthEnvelope(msg.Text); name != "" {
-				m.selfUserName = name
+			for _, seg := range parseHearthSegments(msg.Text) {
+				if seg.kind == "" && seg.fromName != "" {
+					m.selfUserName = seg.fromName
+					break
+				}
 			}
 		}
 		agentName := m.agentNameFor(id)

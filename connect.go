@@ -138,6 +138,24 @@ func startTranscriptStreamer(ctx context.Context, agent, aiAgentInstanceID, agen
 	cmd.Process.Release()
 }
 
+// parseStreamPID extracts the PID from a hearth-stream-<id>.pid file. The file
+// holds "<pid> <ai_agent_instance_id>" (see the writers in connect.go and
+// stream.go). Returns 0 on any malformed content. One helper so every reader
+// agrees on the format — the orphan reaper (cleanupOrphanMarkers) previously
+// Atoi'd the WHOLE "<pid> <uuid>" string, which always failed, so it never
+// reaped a single orphan stream process after a daemon crash.
+func parseStreamPID(data []byte) int {
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return 0
+	}
+	pid, err := strconv.Atoi(fields[0])
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
 // killStreamer kills the detached transcript streamer process and removes its PID file.
 func killStreamer(aiAgentInstanceID string) {
 	pidFile := filepath.Join(os.TempDir(), "hearth-stream-"+aiAgentInstanceID+".pid")
@@ -145,12 +163,8 @@ func killStreamer(aiAgentInstanceID string) {
 	if err != nil {
 		return
 	}
-	fields := strings.SplitN(string(data), " ", 2)
-	if len(fields) < 1 {
-		return
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(fields[0]))
-	if err != nil || pid <= 0 {
+	pid := parseStreamPID(data)
+	if pid == 0 {
 		return
 	}
 	if proc, err := os.FindProcess(pid); err == nil {

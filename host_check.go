@@ -67,9 +67,9 @@ func runHostCheck(args []string) {
 	}
 
 	if len(wds) == 0 && len(agents) == 0 {
-		fmt.Fprintln(os.Stderr, "No working directories or non-retired agents on this host in the current household.")
-		fmt.Fprintln(os.Stderr, "If this host is bound to a different household, switch first:")
-		fmt.Fprintln(os.Stderr, "  hearth hh household switch <slug>")
+		fmt.Fprintln(os.Stderr, "No working directories or non-retired agents on this host in its household.")
+		fmt.Fprintln(os.Stderr, "If you expected some here, confirm this host is enrolled in the intended household")
+		fmt.Fprintln(os.Stderr, "(the binding is set at 'hearth login' time; re-bind via 'hearth host forget' + re-login).")
 		return
 	}
 

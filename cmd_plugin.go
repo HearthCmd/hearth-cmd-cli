@@ -302,7 +302,7 @@ func runPluginUninstall(args []string) {
 func sendPluginIPC(req ipcRequest) (*ipcResponse, error) {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("cannot connect to daemon: %v\nRun 'hearth start' first", err)
+		return nil, daemonDialError(err)
 	}
 	defer conn.Close()
 

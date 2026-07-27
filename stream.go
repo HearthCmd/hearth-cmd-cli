@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -88,6 +89,12 @@ func tailAndPump(transcriptPath, bridgePath string, t StreamTransformer) {
 
 	reader := bufio.NewReader(f)
 	var partial string
+	// lineIndex is the 0-based ordinal of the current SOURCE line. It counts
+	// every logical line read from the top of the file (including empty and
+	// transform-skipped ones), which is exactly how the replay path counts
+	// (readLastNLines), so the two paths stamp identical `seq` values for the
+	// same entry. See docs/transcript-sequence-number-spec.md.
+	lineIndex := 0
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -95,7 +102,7 @@ func tailAndPump(transcriptPath, bridgePath string, t StreamTransformer) {
 			fullLine := trimNewline(partial + line)
 			partial = ""
 			if fullLine != "" {
-				for _, out := range t.TransformLine(fullLine) {
+				for _, out := range transformLineWithSeq(t, fullLine, lineIndex) {
 					if len(out) == 0 {
 						continue
 					}
@@ -105,6 +112,7 @@ func tailAndPump(transcriptPath, bridgePath string, t StreamTransformer) {
 					}
 				}
 			}
+			lineIndex++ // one increment per complete source line
 		} else if line != "" {
 			partial += line
 		}
@@ -117,6 +125,42 @@ func tailAndPump(transcriptPath, bridgePath string, t StreamTransformer) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// transformLineWithSeq runs the harness transform on one source line and stamps
+// each emitted entry with its ordering key: `seq` (the source line index) and
+// `sub` (the entry's position among the entries this line produced). Shared by
+// live tail (tailAndPump) and replay (replayTranscriptHistory) so both paths
+// assign identical keys to the same entry — the property that lets clients
+// dedup the live/replay overlap and order exactly. The relay later appends the
+// third key part, `block`. See docs/transcript-sequence-number-spec.md.
+func transformLineWithSeq(t StreamTransformer, line string, seq int) [][]byte {
+	outs := t.TransformLine(line)
+	for i := range outs {
+		if len(outs[i]) == 0 {
+			continue
+		}
+		outs[i] = stampSeq(outs[i], seq, i)
+	}
+	return outs
+}
+
+// stampSeq injects integer `seq` and `sub` fields into a transformed entry's
+// JSON object, preserving every existing field. Best-effort: a non-object entry
+// (shouldn't happen for our transforms) is returned unchanged, so a stamping
+// failure degrades to today's content-hash behavior rather than dropping data.
+func stampSeq(entry []byte, seq, sub int) []byte {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &m); err != nil {
+		return entry
+	}
+	m["seq"] = json.RawMessage(strconv.Itoa(seq))
+	m["sub"] = json.RawMessage(strconv.Itoa(sub))
+	out, err := json.Marshal(m)
+	if err != nil {
+		return entry
+	}
+	return out
 }
 
 // isSlashCommand returns true if the JSONL line represents a Claude Code

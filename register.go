@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -269,21 +268,12 @@ func resolveTargetOrgID(reader *bufio.Reader, baseURL, sessionToken, orgArg stri
 }
 
 func runRegister(args []string) {
-	var email, inviteToken, orgArg, approvalPolicyArg string
+	var email, orgArg, approvalPolicyArg string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" {
-			fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--invite <token>] [--org <slug-or-id>] [--approval-policy owner_only|org_members]\n")
+			fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--org <slug-or-id>] [--approval-policy owner_only|org_members]\n")
 			os.Exit(0)
-		}
-		if a == "--invite" {
-			if i+1 >= len(args) {
-				fmt.Fprintf(os.Stderr, "Error: --invite requires a token\n")
-				os.Exit(1)
-			}
-			inviteToken = strings.TrimSpace(args[i+1])
-			i++
-			continue
 		}
 		if a == "--org" {
 			if i+1 >= len(args) {
@@ -311,7 +301,7 @@ func runRegister(args []string) {
 			email = strings.TrimSpace(a)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--invite <token>] [--org <slug-or-id>]\n")
+		fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--org <slug-or-id>]\n")
 		os.Exit(1)
 	}
 
@@ -532,26 +522,11 @@ func runRegister(args []string) {
 		}
 	}
 
-	// Invite accept path for brand-new users: /hosts/enroll doesn't take an
-	// invite_token, so we chain a device-authed POST /invites/accept using
-	// the credentials we just minted. Email match is enforced server-side.
-	if inviteToken != "" {
-		data, err := deviceAuthedPost(baseURL, "/invites/accept", enroll.IODeviceID, enroll.IODeviceSecret,
-			ActionTuple{Kind: "invite", ID: inviteToken, Action: "accept"},
-			map[string]string{
-				"token": inviteToken,
-			})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: invite accept failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "Registration succeeded; re-run 'hearth hh invite accept %s' to retry.\n", inviteToken)
-			return
-		}
-		var resp struct {
-			OrganizationID   string `json:"organization_id"`
-			OrganizationName string `json:"organization_name"`
-		}
-		if err := json.Unmarshal(data, &resp); err == nil && resp.OrganizationName != "" {
-			fmt.Fprintf(os.Stderr, "Joined %s. Your current household is now %s.\n", resp.OrganizationName, resp.OrganizationID)
-		}
-	}
+	// Joining an invited household is a separate, tokenless step:
+	// `hearth hh invite accept` lists what this address was invited to and
+	// joins by selection. It's deliberately not chained into login —
+	// enrolling a host and joining a household are different decisions, and
+	// the accept path needs the daemon (it's a ws_request). The old
+	// `--invite <token>` flag and its /invites/accept call are gone with
+	// the token.
 }

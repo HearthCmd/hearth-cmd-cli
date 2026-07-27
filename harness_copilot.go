@@ -97,7 +97,7 @@ func (copilotHarness) PostSubmit(_ *os.Process) error { return nil }
 // (lifecycle-coupled to the interpose chunk); not absorbed here yet.
 func (copilotHarness) PreSpawn(ctx HarnessCtx) error {
 	preAcceptCopilotTrust(ctx.Cwd)
-	return installHearthInstructions("copilot", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd)
+	return installHearthInstructions("copilot", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd, ctx.HearthPromptBody)
 }
 
 func (copilotHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {

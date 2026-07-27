@@ -64,7 +64,7 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 //
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.
-func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd, modelProvider, modelName, jobTitle, jobMandate, organizationName, lastSessionID string) (int, error) {
+func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd, modelProvider, modelName, jobTitle, jobMandate, organizationName, lastSessionID, systemPrompt string) (int, error) {
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
 		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
@@ -99,6 +99,7 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 		JobMandate:        jobMandate,
 		OrganizationName:  organizationName,
 		LastSessionID:     lastSessionID,
+		SystemPrompt:      systemPrompt,
 	}
 	s, err := d.newAgentInstance(req)
 	if err != nil {
@@ -282,6 +283,7 @@ func (d *Daemon) handleWakeAgentInstance(agentInstanceID string, spawnCtx json.R
 		JobMandate       string `json:"job_mandate"`
 		OrganizationName string `json:"organization_name"`
 		LastSessionID    string `json:"last_session_id"`
+		SystemPrompt     string `json:"system_prompt"`
 	}
 	if err := json.Unmarshal(spawnCtx, &ctx); err != nil {
 		log.Printf("daemon: wake %s: invalid spawn_context: %v", agentInstanceID, err)
@@ -293,7 +295,7 @@ func (d *Daemon) handleWakeAgentInstance(agentInstanceID string, spawnCtx json.R
 		log.Printf("daemon: wake %s: spawn_context host %s doesn't match this daemon %s", agentInstanceID, ctx.HostID, d.hostID)
 		return
 	}
-	if _, err := d.spawnAgentInstance(agentInstanceID, ctx.AgentName, ctx.HarnessName, ctx.DirectoryPath, ctx.ModelProvider, ctx.ModelName, ctx.JobTitle, ctx.JobMandate, ctx.OrganizationName, ctx.LastSessionID); err != nil {
+	if _, err := d.spawnAgentInstance(agentInstanceID, ctx.AgentName, ctx.HarnessName, ctx.DirectoryPath, ctx.ModelProvider, ctx.ModelName, ctx.JobTitle, ctx.JobMandate, ctx.OrganizationName, ctx.LastSessionID, ctx.SystemPrompt); err != nil {
 		log.Printf("daemon: wake %s: spawn failed: %v", agentInstanceID, err)
 	}
 }

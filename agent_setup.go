@@ -54,7 +54,11 @@ type InterposeSetup struct {
 // verbs / connections are available. Built by
 // buildResourcePluginPrompt; empty when the daemon has no dev
 // connections (zero token cost for non-plugin setups).
-func buildAgentCommand(agent, identityPrompt, cwd, lastSessionID, resourcePluginPrompt string) (*AgentSetup, error) {
+// serverSystemPrompt is the server-owned, versioned hearth boilerplate
+// resolved from spawn_context.system_prompt. When empty (old server / unseeded
+// catalog / legacy NULL peg) we fall back to the compiled-in
+// hearthSystemPromptFallback so an agent never spawns with no prompt.
+func buildAgentCommand(agent, identityPrompt, cwd, lastSessionID, resourcePluginPrompt, serverSystemPrompt string) (*AgentSetup, error) {
 	command := agentBinary(agent)
 	var cmdArgs []string
 
@@ -99,9 +103,13 @@ func buildAgentCommand(agent, identityPrompt, cwd, lastSessionID, resourcePlugin
 	// Combine identity with the standard hearth prompt for harnesses that
 	// take a system-prompt arg. Identity comes first so the model has the
 	// "who am I" framing before the operational instructions.
-	systemPrompt := hearthSystemPrompt
+	hearthBody := serverSystemPrompt
+	if hearthBody == "" {
+		hearthBody = hearthSystemPromptFallback
+	}
+	systemPrompt := hearthBody
 	if identityPrompt != "" {
-		systemPrompt = identityPrompt + "\n\n" + hearthSystemPrompt
+		systemPrompt = identityPrompt + "\n\n" + hearthBody
 	}
 	if resourcePluginPrompt != "" {
 		systemPrompt = systemPrompt + "\n\n" + resourcePluginPrompt

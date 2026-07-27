@@ -69,9 +69,15 @@ func agentSupportsResume(agent string) bool {
 	return false
 }
 
-// hearthSystemPrompt is appended to the agent's system prompt to teach it
-// how to interpret permission denials from the hearth interpose library.
-const hearthSystemPrompt = `Tool calls are managed by a permission system called hearth. ` +
+// hearthSystemPromptFallback is the compiled-in copy of the hearth agent
+// boilerplate. It is NO LONGER the source of truth: the live prompt is
+// server-owned and versioned (the system_prompts catalog), resolved per-spawn
+// and delivered in spawn_context.system_prompt. This copy is used ONLY when
+// the server sent no prompt — an old server, an unseeded catalog, or a legacy
+// instance whose system_prompt_id peg is NULL. Keep it reasonably fresh, but a
+// drift test (agent_prompt_drift_test.go) asserts its sha256 still appears in
+// relay/sql/seed.sql so it can't silently diverge from the seeded default.
+const hearthSystemPromptFallback = `Tool calls are managed by a permission system called hearth. ` +
 	`If a command exits with code 126, or a file operation fails with "Permission denied", ` +
 	`the user has explicitly denied this action. ` +
 	`Do not retry the same action. Try a different approach or ask the user what they'd like instead. ` +
@@ -112,6 +118,15 @@ const hearthSystemPrompt = `Tool calls are managed by a permission system called
 	`announcing the outcome. They are NOT messages to you and require no response. ` +
 	`Treat them exactly like the warmup ping: produce no output, no tool calls, no acknowledgment, ` +
 	`and never paraphrase or summarize them back to the humans. Wait for the next real turn.` +
+	"\n\n" +
+	`If you truly cannot stop yourself from acknowledging one of these system_event annotations ` +
+	`(or the warmup ping, or a message plainly addressed to another participant), do NOT send a ` +
+	`normal reply such as "No response required", "Understood", or "Noted" — those render as noise ` +
+	`in the humans' chat and defeat the whole point. Instead, your ENTIRE message must be exactly ` +
+	`the single token ` + "`<hearth-silent/>`" + ` and nothing else: no surrounding words, no ` +
+	`punctuation, no explanation, no code fence. The interface recognizes that exact token and hides ` +
+	`it from the transcript. Producing no output at all is still strongly preferred — this token is ` +
+	`only a pressure valve for when you would otherwise chime in.` +
 	"\n\n" +
 	`## Org Chat` + "\n\n" +
 	`You may receive messages from the org's shared chat room. They arrive as a turn starting with ` +

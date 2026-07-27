@@ -119,7 +119,7 @@ func (geminiHarness) PostSubmit(p *os.Process) error {
 // auto-loads that file as part of its system prompt — equivalent to
 // claude's --append-system-prompt but on-disk.
 func (geminiHarness) PreSpawn(ctx HarnessCtx) error {
-	return installHearthInstructions("gemini", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd)
+	return installHearthInstructions("gemini", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd, ctx.HearthPromptBody)
 }
 
 func (geminiHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {

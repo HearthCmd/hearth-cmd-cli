@@ -86,7 +86,7 @@ func (d *DaemonWS) replayTranscriptHistory(aiAgentInstanceID string, limit int) 
 		time.Sleep(pollEach)
 	}
 
-	lines, err := readLastNLines(transcriptPath, limit)
+	lines, baseIndex, err := readLastNLinesIndexed(transcriptPath, limit)
 	if err != nil {
 		log.Printf("daemon-ws: history read failed for %s (%s): %v", aiAgentInstanceID, transcriptPath, err)
 		return
@@ -97,8 +97,11 @@ func (d *DaemonWS) replayTranscriptHistory(aiAgentInstanceID string, limit int) 
 
 	agentLabel := aw.agent // already the server-side label
 	emitted := 0
-	for _, line := range lines {
-		for _, transformed := range xform.TransformLine(line) {
+	for i, line := range lines {
+		// baseIndex+i is the line's absolute 0-based position in the file —
+		// the same `seq` the live tail assigns to this entry, so the two
+		// paths' entries dedup and order identically on the client.
+		for _, transformed := range transformLineWithSeq(xform, line, baseIndex+i) {
 			if len(transformed) == 0 {
 				continue
 			}
@@ -131,13 +134,24 @@ func runtimeAgentFromServerName(name string) string {
 // JSONL grew. JSONL lines from claude/codex tool_results can hit several
 // hundred KB each, so the underlying reader buffer is sized generously.
 func readLastNLines(path string, n int) ([]string, error) {
+	lines, _, err := readLastNLinesIndexed(path, n)
+	return lines, err
+}
+
+// readLastNLinesIndexed is readLastNLines plus baseIndex — the absolute 0-based
+// index (from the top of the file) of the first returned line. The replay path
+// needs it to stamp each replayed entry with the same source-line `seq` the
+// live tail assigns, so live and replay agree. It counts every line the same
+// way tailAndPump does — one per logical line, from the top — so the two
+// paths' ordinals cannot drift.
+func readLastNLinesIndexed(path string, n int) ([]string, int, error) {
 	if n <= 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
@@ -145,6 +159,7 @@ func readLastNLines(path string, n int) ([]string, error) {
 	ring := make([]string, n)
 	head := 0
 	count := 0
+	total := 0 // every line seen, for the absolute base index
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -154,12 +169,13 @@ func readLastNLines(path string, n int) ([]string, error) {
 			if count < n {
 				count++
 			}
+			total++
 		}
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return nil, err
+			return nil, 0, err
 		}
 	}
 
@@ -171,5 +187,7 @@ func readLastNLines(path string, n int) ([]string, error) {
 	for i := 0; i < count; i++ {
 		out[i] = ring[(start+i)%n]
 	}
-	return out, nil
+	// The last `count` of `total` lines are returned; out[0] is line
+	// (total-count) counting from 0.
+	return out, total - count, nil
 }

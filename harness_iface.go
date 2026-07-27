@@ -305,6 +305,15 @@ type HarnessCtx struct {
 	// one to do the split themselves.
 	IdentityPrompt string
 
+	// HearthPromptBody is the server-owned, versioned hearth boilerplate
+	// (spawn_context.system_prompt) — the file-based harnesses (codex,
+	// gemini, copilot) write it verbatim into their instruction file via
+	// installHearthInstructions. Empty when the server sent none, in which
+	// case installHearthInstructions substitutes hearthSystemPromptFallback.
+	// Flag-based harnesses ignore this — their copy is already composed into
+	// SystemPrompt.
+	HearthPromptBody string
+
 	// AIAgentInstanceID is the server-side agent instance id. Surfaced
 	// for harnesses whose on-disk setup embeds it (codex's AGENTS.md
 	// sentinel). Most harnesses ignore it.

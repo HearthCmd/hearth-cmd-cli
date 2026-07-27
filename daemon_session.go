@@ -142,7 +142,7 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		}
 	}
 	resourcePrompt := buildResourcePluginPrompt(req.AIAgentInstanceID, d.agentGrants, d.resourceConnections, d.plugins, entitiesByConn)
-	setup, err := buildAgentCommand(agent, identityPrompt, cwd, req.LastSessionID, resourcePrompt)
+	setup, err := buildAgentCommand(agent, identityPrompt, cwd, req.LastSessionID, resourcePrompt, req.SystemPrompt)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +184,7 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		hctx := HarnessCtx{
 			AIAgentInstanceID: aiAgentInstanceID,
 			IdentityPrompt:    identityPrompt,
+			HearthPromptBody:  req.SystemPrompt,
 			Cwd:               cwd,
 		}
 		if err := h.PreSpawn(hctx); err != nil {

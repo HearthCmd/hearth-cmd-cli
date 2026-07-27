@@ -25,8 +25,9 @@ import (
 //
 // Returns the empty string when the agent has no granted connections,
 // so non-plugin agents pay zero token cost. The block is injected by
-// the agent-spawn path (agent_setup.go), prepended to the
-// hearthSystemPrompt.
+// the agent-spawn path (agent_setup.go), appended after the
+// hearth boilerplate (server-owned system prompt, or
+// hearthSystemPromptFallback when the server sent none).
 //
 // agentID + grants gate the filter: a connection only appears if
 // grants.HasGrant(agentID, conn.ConnectionID) is true. Empty agentID

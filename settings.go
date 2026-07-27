@@ -15,7 +15,14 @@ import (
 // prebuilt libhook-*.gz blobs emit it; rename when the blobs get rebuilt.)
 // For codex, aiAgentInstanceID is embedded as a sentinel so we can match the
 // transcript to this instance even when multiple instances share the same CWD.
-func installHearthInstructions(agent, aiAgentInstanceID, identityPrompt, cwd string) error {
+// hearthBody is the server-owned, versioned hearth boilerplate
+// (spawn_context.system_prompt). Empty falls back to the compiled-in
+// hearthSystemPromptFallback so the instruction file is never written without
+// the permission-denial semantics.
+func installHearthInstructions(agent, aiAgentInstanceID, identityPrompt, cwd, hearthBody string) error {
+	if hearthBody == "" {
+		hearthBody = hearthSystemPromptFallback
+	}
 	if cwd == "" {
 		var err error
 		cwd, err = os.Getwd()
@@ -52,7 +59,7 @@ func installHearthInstructions(agent, aiAgentInstanceID, identityPrompt, cwd str
 	if identityPrompt != "" {
 		content += identityPrompt + "\n\n"
 	}
-	content += hearthSystemPrompt + "\n"
+	content += hearthBody + "\n"
 	if agent == "codex" && aiAgentInstanceID != "" {
 		content += "<!-- hearth-agent-instance:" + aiAgentInstanceID + " -->\n"
 	}

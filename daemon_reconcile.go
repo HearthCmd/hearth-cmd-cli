@@ -8,8 +8,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -44,6 +42,11 @@ type wakeTargetPayload struct {
 		// post-spawn report. Daemon falls back to a fresh id if the
 		// prior on-disk transcript is gone.
 		LastSessionID string `json:"last_session_id"`
+		// SystemPrompt is the server-owned versioned hearth boilerplate; empty
+		// when the server didn't send one (old server / unseeded catalog /
+		// legacy NULL peg), in which case the daemon uses its compiled-in
+		// fallback. See the system_prompts catalog + spawn_context.
+		SystemPrompt string `json:"system_prompt"`
 	} `json:"spawn_context"`
 }
 
@@ -110,7 +113,7 @@ func (d *Daemon) cleanupOrphanMarkers() {
 		for _, path := range entries {
 			data, err := os.ReadFile(path)
 			if err == nil {
-				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+				if pid := parseStreamPID(data); pid > 0 {
 					if proc, err := os.FindProcess(pid); err == nil {
 						// Signal(0) returns nil if the process exists.
 						if proc.Signal(syscall.Signal(0)) == nil {
@@ -203,6 +206,7 @@ func (d *Daemon) wakeOneAgent(t wakeTargetPayload) {
 		t.SpawnContext.JobMandate,
 		t.SpawnContext.OrganizationName,
 		t.SpawnContext.LastSessionID,
+		t.SpawnContext.SystemPrompt,
 	); err != nil {
 		log.Printf("daemon: wake %s: spawn failed: %v", id, err)
 		d.reportPIDStatus(id, "spawn_failed")

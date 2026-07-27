@@ -31,7 +31,7 @@ func readFile(t *testing.T, p string) string {
 
 func TestInstallHearthInstructions_Gemini(t *testing.T) {
 	cwd := t.TempDir()
-	if err := installHearthInstructions("gemini", "", "", cwd); err != nil {
+	if err := installHearthInstructions("gemini", "", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	body := readFile(t, filepath.Join(cwd, "GEMINI.md"))
@@ -42,7 +42,7 @@ func TestInstallHearthInstructions_Gemini(t *testing.T) {
 
 func TestInstallHearthInstructions_Copilot_CreatesDotGithub(t *testing.T) {
 	cwd := t.TempDir()
-	if err := installHearthInstructions("copilot", "", "", cwd); err != nil {
+	if err := installHearthInstructions("copilot", "", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	target := filepath.Join(cwd, ".github", "copilot-instructions.md")
@@ -54,7 +54,7 @@ func TestInstallHearthInstructions_Copilot_CreatesDotGithub(t *testing.T) {
 
 func TestInstallHearthInstructions_Codex_EmbedsInstanceSentinel(t *testing.T) {
 	cwd := t.TempDir()
-	if err := installHearthInstructions("codex", "instance-xyz", "", cwd); err != nil {
+	if err := installHearthInstructions("codex", "instance-xyz", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	body := readFile(t, filepath.Join(cwd, "AGENTS.md"))
@@ -65,7 +65,7 @@ func TestInstallHearthInstructions_Codex_EmbedsInstanceSentinel(t *testing.T) {
 
 func TestInstallHearthInstructions_Codex_OmitsSentinelWhenIDEmpty(t *testing.T) {
 	cwd := t.TempDir()
-	if err := installHearthInstructions("codex", "", "", cwd); err != nil {
+	if err := installHearthInstructions("codex", "", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	body := readFile(t, filepath.Join(cwd, "AGENTS.md"))
@@ -77,7 +77,7 @@ func TestInstallHearthInstructions_Codex_OmitsSentinelWhenIDEmpty(t *testing.T) 
 func TestInstallHearthInstructions_EmbedsIdentityPrompt(t *testing.T) {
 	cwd := t.TempDir()
 	identity := "Identity: You are Cody."
-	if err := installHearthInstructions("gemini", "", identity, cwd); err != nil {
+	if err := installHearthInstructions("gemini", "", identity, cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	body := readFile(t, filepath.Join(cwd, "GEMINI.md"))
@@ -93,7 +93,7 @@ func TestInstallHearthInstructions_PreservesUserFile(t *testing.T) {
 	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installHearthInstructions("gemini", "", "", cwd); err != nil {
+	if err := installHearthInstructions("gemini", "", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if got := readFile(t, target); got != original {
@@ -109,7 +109,7 @@ func TestInstallHearthInstructions_OverwritesOwnFile(t *testing.T) {
 	if err := os.WriteFile(target, []byte("<!-- hearth -->\nold content\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installHearthInstructions("gemini", "", "freshIdentity", cwd); err != nil {
+	if err := installHearthInstructions("gemini", "", "freshIdentity", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	got := readFile(t, target)
@@ -123,7 +123,7 @@ func TestInstallHearthInstructions_OverwritesOwnFile(t *testing.T) {
 
 func TestInstallHearthInstructions_UnknownAgentIsNoop(t *testing.T) {
 	cwd := t.TempDir()
-	if err := installHearthInstructions("totally-unknown", "", "", cwd); err != nil {
+	if err := installHearthInstructions("totally-unknown", "", "", cwd, ""); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	entries, _ := os.ReadDir(cwd)

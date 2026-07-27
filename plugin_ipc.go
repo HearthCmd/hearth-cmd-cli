@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -652,6 +653,26 @@ func backupExistingInstall(pluginsDir, slug, finalDir string) error {
 		return fmt.Errorf("mkdir backup parent: %w", err)
 	}
 	if err := os.Rename(finalDir, backup); err != nil {
+		// rename() needs write permission on the directory holding the
+		// SOURCE, because it has to unlink that entry. So a plugin whose
+		// parent directory this account cannot write to fails here — and the
+		// bare syscall error ("rename ...: permission denied") names the
+		// operation rather than the problem or the remedy.
+		//
+		// This is the normal state of any host whose plugins were placed by
+		// hand before the catalog existed: the documented recipe copied them
+		// in as root, and an intermediate namespace directory left
+		// root-owned is invisible until the first upgrade tries to move it.
+		// Hit on a live host 2026-07-21.
+		if errors.Is(err, os.ErrPermission) {
+			return fmt.Errorf(
+				"%s is not writable by this account, so the existing install cannot be "+
+					"moved aside. Plugins installed by hand before the catalog existed are "+
+					"often left root-owned. Fix with:\n"+
+					"    sudo chown -R $(id -un):$(id -gn) %s\n"+
+					"underlying error: %w",
+				filepath.Dir(finalDir), filepath.Dir(pluginsDir), err)
+		}
 		return fmt.Errorf("move aside: %w", err)
 	}
 	return nil

@@ -138,6 +138,12 @@ type ipcRequest struct {
 	// (claude, copilot, pi); validated against the on-disk transcript
 	// existing before reuse, otherwise mints fresh.
 	LastSessionID string `json:"-"`
+	// SystemPrompt is the server-owned, versioned hearth boilerplate resolved
+	// from spawn_context.system_prompt (see the system_prompts catalog). Empty
+	// when the server didn't send one (old server / unseeded catalog / legacy
+	// NULL peg), in which case buildAgentCommand + installHearthInstructions
+	// fall back to the compiled-in hearthSystemPromptFallback const.
+	SystemPrompt string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
@@ -473,6 +479,76 @@ func daemonPidPath() string {
 	return filepath.Join(home, ".hearth", "daemon.pid")
 }
 
+// unreachableDaemonPID reports the PID of a daemon that is running but cannot
+// be reached over IPC, or 0 when there is no such thing.
+//
+// The socket occasionally disappears from /tmp while the daemon that created
+// it is alive and still holding the listener. Six occurrences on 2026-07-21,
+// all on dev builds started from an SSH session; never once on a
+// systemd-managed host, across a full ten-account fleet restart. The
+// mechanism is unidentified — tmpfiles cleanup, a general /tmp sweep, and a
+// lock-vs-unlink race were each investigated and ruled out.
+//
+// The root cause is unfixed, but its cost was never the missing file. It was
+// that every command then described the situation wrongly: `stop` reported
+// "already stopped" about a running daemon, `start` reported a slow start,
+// and `login` silently failed to deliver new credentials, leaving the daemon
+// 401ing for half an hour with correct credentials on disk. Nothing in that
+// chain pointed at a socket.
+//
+// So: when the socket cannot be dialled, check whether a process still holds
+// the pid file. If one does, the caller can say what is actually wrong and
+// how to fix it, without anyone needing to know why the file vanished.
+func unreachableDaemonPID() int {
+	data, err := os.ReadFile(daemonPidPath())
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return 0
+	}
+	// Signal 0 tests for existence without delivering anything.
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		return 0 // stale pid file; the daemon really is gone
+	}
+	return pid
+}
+
+// unreachableDaemonMessage renders the explanation, or "" when the daemon is
+// genuinely not running and the ordinary message applies.
+func unreachableDaemonMessage() string {
+	pid := unreachableDaemonPID()
+	if pid == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"daemon is running (PID %d) but its IPC socket at %s is missing, so it "+
+			"cannot be reached.\n"+
+			"This affects dev builds started from an SSH session; systemd-managed "+
+			"hosts have not been seen to hit it.\n"+
+			"Fix with:\n"+
+			"    kill %d && sleep 3 && hearth start",
+		pid, daemonSockPath(), pid)
+}
+
+// daemonDialError turns a failed IPC dial into an error that says what to do.
+//
+// The stock advice — "Run 'hearth start' first" — is actively wrong when the
+// daemon is alive but unreachable: start refuses on the singleton lock, so
+// following the instruction produces a second confusing message rather than a
+// working daemon.
+func daemonDialError(err error) error {
+	if msg := unreachableDaemonMessage(); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	return fmt.Errorf("cannot connect to daemon: %v\nRun 'hearth start' first", err)
+}
+
 // isDaemonRunning checks if a daemon is already running by probing the socket.
 func isDaemonRunning() bool {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 500*time.Millisecond)
@@ -590,6 +666,9 @@ func ensureDaemon(deviceIDFlag string) error {
 		if isDaemonRunning() {
 			return nil
 		}
+	}
+	if msg := unreachableDaemonMessage(); msg != "" {
+		return fmt.Errorf("%s", msg)
 	}
 	return fmt.Errorf("daemon started but socket not ready")
 }
@@ -1974,6 +2053,13 @@ func sendControl(conn net.Conn, resp ipcResponse) {
 func stopDaemon() {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 2*time.Second)
 	if err != nil {
+		// "already stopped" is a claim, and it is wrong whenever the daemon
+		// is alive but unreachable — which is exactly when someone is most
+		// likely to be running `stop` in the first place.
+		if msg := unreachableDaemonMessage(); msg != "" {
+			fmt.Fprintf(os.Stderr, "hearth: %s\n", msg)
+			return
+		}
 		fmt.Fprintf(os.Stderr, "hearth: host is already stopped\n")
 		return
 	}

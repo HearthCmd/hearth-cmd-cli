@@ -18,7 +18,7 @@ import (
 // ---------- buildAgentCommand ----------
 
 func TestBuildAgentCommand_ClaudeFlags(t *testing.T) {
-	got, err := buildAgentCommand("claude", "you are a gardener", "/tmp/proj", "", "")
+	got, err := buildAgentCommand("claude", "you are a gardener", "/tmp/proj", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestBuildAgentCommand_ClaudeFlags(t *testing.T) {
 }
 
 func TestBuildAgentCommand_CodexFlags(t *testing.T) {
-	got, _ := buildAgentCommand("codex", "", "/tmp/proj", "", "")
+	got, _ := buildAgentCommand("codex", "", "/tmp/proj", "", "", "")
 	args := strings.Join(got.Args, " ")
 	if !strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Error("codex must launch with --dangerously-bypass-approvals-and-sandbox")
@@ -60,7 +60,7 @@ func TestBuildAgentCommand_CodexFlags(t *testing.T) {
 }
 
 func TestBuildAgentCommand_CopilotFlags(t *testing.T) {
-	got, _ := buildAgentCommand("copilot", "", "/tmp/proj", "", "")
+	got, _ := buildAgentCommand("copilot", "", "/tmp/proj", "", "", "")
 	args := strings.Join(got.Args, " ")
 	if !strings.Contains(args, "--allow-all") {
 		t.Error("copilot must launch with --allow-all")
@@ -74,14 +74,14 @@ func TestBuildAgentCommand_CopilotFlags(t *testing.T) {
 }
 
 func TestBuildAgentCommand_GeminiYolo(t *testing.T) {
-	got, _ := buildAgentCommand("gemini", "", "/tmp/proj", "", "")
+	got, _ := buildAgentCommand("gemini", "", "/tmp/proj", "", "", "")
 	if !contains(got.Args, "--yolo") {
 		t.Error("gemini must launch with --yolo")
 	}
 }
 
 func TestBuildAgentCommand_PiFlags(t *testing.T) {
-	got, _ := buildAgentCommand("pi", "", "/tmp/proj", "", "")
+	got, _ := buildAgentCommand("pi", "", "/tmp/proj", "", "", "")
 	args := strings.Join(got.Args, " ")
 	if !strings.Contains(args, "--append-system-prompt") {
 		t.Error("pi must take --append-system-prompt (no --dangerously-skip-permissions)")
@@ -95,15 +95,15 @@ func TestBuildAgentCommand_PiFlags(t *testing.T) {
 }
 
 func TestBuildAgentCommand_UnknownAgentNoFlags(t *testing.T) {
-	got, _ := buildAgentCommand("brand-new-agent", "", "/tmp/proj", "", "")
+	got, _ := buildAgentCommand("brand-new-agent", "", "/tmp/proj", "", "", "")
 	if len(got.Args) != 0 {
 		t.Errorf("unknown agent should pass no flags, got %v", got.Args)
 	}
 }
 
 func TestBuildAgentCommand_FreshUUIDPerCall(t *testing.T) {
-	a, _ := buildAgentCommand("claude", "", "/tmp/p", "", "")
-	b, _ := buildAgentCommand("claude", "", "/tmp/p", "", "")
+	a, _ := buildAgentCommand("claude", "", "/tmp/p", "", "", "")
+	b, _ := buildAgentCommand("claude", "", "/tmp/p", "", "", "")
 	if a.AIAgentInstanceID == b.AIAgentInstanceID {
 		t.Error("each invocation should produce a unique aiAgentInstanceID")
 	}
