@@ -13,9 +13,17 @@ if [[ ! -f "$BINARY" ]]; then
   exit 1
 fi
 
+# Credentials are read from the canonical names below; an operator's own env
+# var names are accepted as fallbacks so personal/CI setups don't have to
+# re-export. Canonical wins if both are set.
+: "${DEVELOPER_ID_APPLICATION:=${HEARTHCMD_NOTARY_DEVELOPER_ID:-}}"
+: "${APPLE_ID:=${HEARTHCMD_NOTARY_APPLE_ID:-}}"
+: "${TEAM_ID:=${VERGELABS_TEAM_ID:-}}"
+: "${APP_PASSWORD:=${HEARTHCMD_APP_PASSWORD:-}}"
+
 for var in DEVELOPER_ID_APPLICATION APPLE_ID TEAM_ID APP_PASSWORD; do
   if [[ -z "${!var:-}" ]]; then
-    echo "Error: $var is not set" >&2
+    echo "Error: $var is not set (nor its alias)" >&2
     exit 1
   fi
 done
@@ -45,7 +53,7 @@ xcrun notarytool submit "$dmg_path" \
 
 echo ""
 echo "Submitted. Check status with:"
-echo "  xcrun notarytool info <submission-id> --apple-id \"\$APPLE_ID\" --team-id \"\$TEAM_ID\" --password \"\$APP_PASSWORD\""
+echo "  xcrun notarytool info <submission-id> --apple-id \"\$HEARTHCMD_NOTARY_APPLE_ID\" --team-id \"\$VERGELABS_TEAM_ID\" --password \"\$HEARTHCMD_APP_PASSWORD\""
 echo ""
 echo "Once accepted, staple with:"
 echo "  xcrun stapler staple $dmg_path"
