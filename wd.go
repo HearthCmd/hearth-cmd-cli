@@ -165,20 +165,15 @@ Run 'hearth wd <command> --help' for details.
 
 		orgID := requireWorkingOrgID()
 
-		reader := bufio.NewReader(os.Stdin)
-
 		if *hostID == "" {
 			*hostID = readConfigValue("host_id")
 		}
 		if *hostID == "" {
-			*hostID = promptLine(reader, "Host ID: ")
-		}
-		if *hostID == "" {
-			fmt.Fprintf(os.Stderr, "hearth: host ID required (run 'hearth start' to enroll)\n")
+			fmt.Fprintf(os.Stderr, "hearth: --host-id required (run 'hearth start' to enroll)\n")
 			os.Exit(1)
 		}
 		if *dir == "" {
-			*dir = promptWithDefault(reader, "Directory path", defaultAgentWorkingDir(orgSlugForID(orgID)))
+			*dir = defaultAgentWorkingDir(orgSlugForID(orgID))
 		}
 
 		payload := map[string]interface{}{

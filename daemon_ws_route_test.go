@@ -76,6 +76,35 @@ func TestRouteControlFrame_SleepFiresSleepFunc(t *testing.T) {
 	}
 }
 
+func TestRouteControlFrame_AnnounceSatelliteFiresFunc(t *testing.T) {
+	d := newTestDaemonWS()
+	type call struct{ agent, conn, entity, msg string }
+	ch := make(chan call, 1)
+	d.announceSatelliteFunc = func(agent, conn, entity, msg string) {
+		ch <- call{agent, conn, entity, msg}
+	}
+
+	// Dispatched on a goroutine (does network IO), so wait for it.
+	d.routeControlFrame([]byte(`{"type":"announce_satellite","ai_agent_instance_id":"agent-3",` +
+		`"connection":"ha","entity_id":"assist_satellite.kitchen","message":"checking with the household"}`))
+
+	select {
+	case c := <-ch:
+		want := call{"agent-3", "ha", "assist_satellite.kitchen", "checking with the household"}
+		if c != want {
+			t.Errorf("announceSatelliteFunc got %+v, want %+v", c, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("announceSatelliteFunc was not called")
+	}
+}
+
+func TestRouteControlFrame_AnnounceSatelliteNilFuncIsSilent(t *testing.T) {
+	d := newTestDaemonWS()
+	// announceSatelliteFunc nil — must not panic.
+	d.routeControlFrame([]byte(`{"type":"announce_satellite","ai_agent_instance_id":"a","connection":"ha","entity_id":"e","message":"m"}`))
+}
+
 func TestRouteControlFrame_SleepNoCallbackIsSilent(t *testing.T) {
 	d := newTestDaemonWS()
 	// sleepFunc nil — must not panic.

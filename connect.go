@@ -3,8 +3,8 @@
 // Helpers used by the agent-spawn path (agent_setup.go, daemon_session.go,
 // daemon_agent.go). The historical `hearth connect` attached-terminal
 // entry point has been removed — agents are launched via
-// 'hearth hh agent create' and driven from the iOS app or
-// 'hearth talk'.
+// 'hearth hh agent create' and driven from the iOS app (or
+// 'hearth hh agent attach' for debugging).
 
 package main
 

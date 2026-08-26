@@ -11,6 +11,26 @@ import (
 	"time"
 )
 
+// transcriptFrame builds the `transcript` WebSocket frame that carries one
+// already-JSON transcript line. It is the SINGLE place the frame is
+// constructed so the live-tail path (here) and the history-replay path
+// (replayTranscriptHistory) cannot drift.
+//
+// retry marks a re-send of an entry the server has already processed once —
+// i.e. a history replay for a newly-connected io_device rebuilding its
+// transcript replica. The relay keys one-shot side effects off this flag,
+// chiefly the @mention native push: it fires only for a live (retry=false)
+// entry, never a replay. The live tail passes retry=false; replay passes
+// retry=true. A divergence here previously re-pushed the same @mention on
+// every replay (once per device open / reconnect) — see
+// processTranscriptEntry / maybePushMentions in the relay.
+func transcriptFrame(agent, dataLine string, retry bool) []byte {
+	if retry {
+		return []byte(fmt.Sprintf(`{"type":"transcript","retry":true,"agent":%q,"data":%s}`, agent, dataLine))
+	}
+	return []byte(fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, dataLine))
+}
+
 // tailBridge tails the bridge file and sends each line over the WebSocket
 // as a JSON transcript message. Blocks until done is closed or an error occurs.
 // After done is closed, drains any remaining lines before returning.
@@ -54,14 +74,12 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 					fullLine := trimNewline(partial + line)
 					partial = ""
 					if fullLine != "" {
-						msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
-						ws.SendText([]byte(msg))
+						ws.SendText(transcriptFrame(agent, fullLine, false))
 					}
 				} else {
 					// EOF or error — send any remaining buffered partial
 					if partial != "" {
-						msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, partial)
-						ws.SendText([]byte(msg))
+						ws.SendText(transcriptFrame(agent, partial, false))
 					}
 					return
 				}
@@ -81,11 +99,11 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 			fullLine := trimNewline(partial + line)
 			partial = ""
 			if fullLine != "" {
-				msg := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, fullLine)
-				ws.SendText([]byte(msg))
+				frame := transcriptFrame(agent, fullLine, false)
+				ws.SendText(frame)
 				linesSent++
 				if linesSent == 1 {
-					log.Printf("bridge: first transcript line sent (%d bytes)", len(msg))
+					log.Printf("bridge: first transcript line sent (%d bytes)", len(frame))
 				}
 			}
 		} else if line != "" {
@@ -103,4 +121,3 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 		}
 	}
 }
-

@@ -95,7 +95,7 @@ func checkOutdated(resp *http.Response) {
 	printOutdatedAndExit(body)
 }
 
-// dialErrorIs426 is a best-effort check for nhooyr.io/websocket dial
+// dialErrorIs426 is a best-effort check for github.com/coder/websocket dial
 // failures caused by the server returning 426 during the upgrade. The
 // library's error text includes the HTTP status code.
 func dialErrorIs426(err error) bool {

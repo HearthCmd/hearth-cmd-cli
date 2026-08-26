@@ -27,14 +27,14 @@ import (
 // to newAgentInstance when spawning an agent via 'org agent create' — in that
 // case it's not serialized over IPC, just passed in-process.
 type ipcRequest struct {
-	Type      string            `json:"type"` // status, stop, update_shutdown, ws_request
-	Agent     string            `json:"agent,omitempty"`
-	Project   string            `json:"project,omitempty"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Winsize   *ipcWinsize       `json:"winsize,omitempty"`
-	Force     bool              `json:"force,omitempty"`
-	WSMsgType string            `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
-	WSData    json.RawMessage   `json:"ws_data,omitempty"`     // for ws_request: the payload
+	Type      string          `json:"type"` // status, stop, update_shutdown, ws_request
+	Agent     string          `json:"agent,omitempty"`
+	Project   string          `json:"project,omitempty"`
+	Cwd       string          `json:"cwd,omitempty"`
+	Winsize   *ipcWinsize     `json:"winsize,omitempty"`
+	Force     bool            `json:"force,omitempty"`
+	WSMsgType string          `json:"ws_msg_type,omitempty"` // for ws_request: the CRUD message type
+	WSData    json.RawMessage `json:"ws_data,omitempty"`     // for ws_request: the payload
 
 	// resource_invoke fields. Carry the Resource Connection id, verb,
 	// and args (JSON object) from the CLI through to
@@ -111,6 +111,11 @@ type ipcRequest struct {
 	ChatAgentInstanceID string `json:"chat_agent_instance_id,omitempty"`
 	ChatText            string `json:"chat_text,omitempty"`
 
+	// Voice handoff fields — used by `hearth voice handoff` to transfer the
+	// calling agent's voice conversation to another household agent (V4).
+	VoiceAgentInstanceID string `json:"voice_agent_instance_id,omitempty"`
+	VoiceHandoffTo       string `json:"voice_handoff_to,omitempty"`
+
 	// SecretID is the server-issued UUID. Operators obtain it from
 	// `hearth secret list` output and pass it to delete/grant/revoke.
 	SecretID string `json:"secret_id,omitempty"`
@@ -165,7 +170,7 @@ type ipcResponse struct {
 	StartedAt     string           `json:"started_at,omitempty"`
 	WSConnected   bool             `json:"ws_connected,omitempty"`
 	ServerURL     string           `json:"server_url,omitempty"`
-	AgentHomePath  string           `json:"agent_home_path,omitempty"`
+	AgentHomePath string           `json:"agent_home_path,omitempty"`
 
 	// harnesses_response: server-side harness names whose local binary the
 	// daemon can resolve on PATH. Populated by handleHarnesses.
@@ -202,9 +207,9 @@ type ipcResponse struct {
 // `hh status`. Lives in the IPC layer rather than on the Harness
 // interface because it's data, not behavior.
 type ipcHarnessVersion struct {
-	Installed string   `json:"installed,omitempty"`  // detected; "" if probe failed
-	Minimum   string   `json:"minimum,omitempty"`    // adapter's MinimumVersion()
-	Tested    []string `json:"tested,omitempty"`     // adapter's KnownTestedVersions()
+	Installed string   `json:"installed,omitempty"` // detected; "" if probe failed
+	Minimum   string   `json:"minimum,omitempty"`   // adapter's MinimumVersion()
+	Tested    []string `json:"tested,omitempty"`    // adapter's KnownTestedVersions()
 }
 
 type ipcWinsize struct {
@@ -240,16 +245,16 @@ type Daemon struct {
 	singletonLock *os.File
 	daemonWS      *DaemonWS // multiplexed WebSocket for all instances
 	hostID        string    // daemon's registered host ID
-	hostSecret  string    // daemon's bearer token for /ws/daemon
-	humanUserID string    // resolved human_user ID (for logs and kept-for-compat IPC)
-	startedAt   time.Time // process start; reported to `hearth status`
+	hostSecret    string    // daemon's bearer token for /ws/daemon
+	humanUserID   string    // resolved human_user ID (for logs and kept-for-compat IPC)
+	startedAt     time.Time // process start; reported to `hearth status`
 
 	// Identity cache populated by server pushes on /ws/daemon. Served to
 	// `hearth status` via the "identity" IPC request so the CLI doesn't
 	// have to round-trip the server for every status invocation.
-	identityMu   sync.RWMutex
-	email        string
-	orgs         []daemonOrgEntry
+	identityMu    sync.RWMutex
+	email         string
+	orgs          []daemonOrgEntry
 	agentHomePath string // server-pushed; "" until first connect
 
 	// plugins is the in-memory set of resource-plugin manifests
@@ -396,7 +401,6 @@ func runStart(args []string) {
 func runStop(args []string) { stopDaemon() }
 
 func runStatus(args []string) { daemonStatus() }
-
 
 // hostList prints the caller's enrolled hosts via the daemon's WS. Auto-starts
 // the daemon if it isn't already running so the user doesn't have to run a
@@ -847,12 +851,13 @@ func (d *Daemon) Run() {
 // that field.
 //
 // Order matters and is load-bearing:
-//   1. write desired_status='disconnected' (WS still open)
-//   2. stop each instance, blocking until its child is reaped
-//   3. wait on agentWg so the per-instance monitoring goroutines finish
-//      their reportPIDStatus calls (WS still open)
-//   4. close the WS
-//   5. close the IPC listener / drop the unix socket
+//  1. write desired_status='disconnected' (WS still open)
+//  2. stop each instance, blocking until its child is reaped
+//  3. wait on agentWg so the per-instance monitoring goroutines finish
+//     their reportPIDStatus calls (WS still open)
+//  4. close the WS
+//  5. close the IPC listener / drop the unix socket
+//
 // Doing (4) before (2) or (3) would silently drop every terminal
 // pid_status update and leave the server believing those agents are still
 // running, pending a later host_disconnected reconciliation.
@@ -1082,6 +1087,8 @@ func (d *Daemon) startDaemonWS() {
 	d.daemonWS.sleepFunc = d.handleSleepAgentInstance
 	d.daemonWS.wakeFunc = d.handleWakeAgentInstance
 	d.daemonWS.cycleFunc = d.handleCycleAgentInstance
+	d.daemonWS.scheduledTriggerFireFunc = d.handleScheduledTriggerFire
+	d.daemonWS.announceSatelliteFunc = d.handleAnnounceSatellite
 	d.daemonWS.accountFunc = d.SetAccount
 	d.daemonWS.organizationsFunc = d.SetOrganizations
 	d.daemonWS.agentHomePathFunc = d.SetAgentHomePath
@@ -1338,7 +1345,23 @@ func (d *Daemon) handleConn(conn net.Conn) {
 			HarnessVersions: collectHarnessVersionsForIPC(),
 		})
 	case "stop":
-		sendControl(conn, ipcResponse{Type: "ok"})
+		// Report the agents about to be drained so `hearth stop` can tell the
+		// human why it's waiting (each agent gets a SIGTERM + up to
+		// agentStopGrace to wrap up, iterated serially — the dominant cost of a
+		// graceful stop). Snapshot before Shutdown mutates the map.
+		d.mu.RLock()
+		draining := make([]instanceInfo, 0, len(d.instances))
+		for _, s := range d.instances {
+			draining = append(draining, instanceInfo{
+				AIAgentInstanceID: s.aiAgentInstanceID,
+				Agent:             s.agent,
+				Project:           s.project,
+				Cwd:               s.cwd,
+				StartedAt:         s.startedAt.Format(time.RFC3339),
+			})
+		}
+		d.mu.RUnlock()
+		sendControl(conn, ipcResponse{Type: "ok", Instances: draining})
 		// Run Shutdown synchronously so it completes under d.wg before the
 		// daemon main loop exits. Otherwise Run() can return (listener closed,
 		// done closed, wg empty because handleConn already returned) and the
@@ -1380,6 +1403,8 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		d.handleApprovePermissionRequest(conn, req)
 	case "chat_reply":
 		d.handleChatReply(conn, req)
+	case "voice_handoff":
+		d.handleVoiceHandoff(conn, req)
 	default:
 		sendControl(conn, ipcResponse{Type: "error", Message: "unknown request type"})
 	}
@@ -1404,6 +1429,30 @@ func (d *Daemon) handleChatReply(conn net.Conn, req ipcRequest) {
 	innerReq := ipcRequest{
 		Type:      "ws_request",
 		WSMsgType: "send_chat_message",
+		WSData:    json.RawMessage(payload),
+	}
+	d.handleWSRequest(conn, innerReq)
+}
+
+// handleVoiceHandoff forwards an agent's voice-handoff request to the server via
+// ws_request. Called when `hearth voice handoff` sends a voice_handoff IPC message
+// (voice track V4).
+func (d *Daemon) handleVoiceHandoff(conn net.Conn, req ipcRequest) {
+	if req.VoiceAgentInstanceID == "" || req.VoiceHandoffTo == "" {
+		sendControl(conn, ipcResponse{Type: "error", Message: "voice_agent_instance_id and to required"})
+		return
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"ai_agent_instance_id": req.VoiceAgentInstanceID,
+		"to":                   req.VoiceHandoffTo,
+	})
+	if err != nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
+		return
+	}
+	innerReq := ipcRequest{
+		Type:      "ws_request",
+		WSMsgType: "voice_handoff",
 		WSData:    json.RawMessage(payload),
 	}
 	d.handleWSRequest(conn, innerReq)
@@ -1504,7 +1553,7 @@ func (d *Daemon) handleResourceInvoke(conn net.Conn, req ipcRequest) {
 	if principalKind == "agent" {
 		agentHint = principalID
 	}
-	bindingID, pe := d.preflightAuthorizeResourceInvoke(d.resourceAuthzWS, principalKind, principalID,
+	bindingID, autofillCreds, pe := d.preflightAuthorizeResourceInvoke(d.resourceAuthzWS, principalKind, principalID,
 		rc.ConnectionID, manifest.PluginSlug, req.ResourceVerb, req.ResourceArgs, agentHint)
 	if pe != nil {
 		sendControl(conn, ipcResponse{
@@ -1515,12 +1564,15 @@ func (d *Daemon) handleResourceInvoke(conn net.Conn, req ipcRequest) {
 		return
 	}
 
-	// Resolve --secret bindings before launching the invoke. Each
-	// secret_id goes through the server's Authorize() check; deny or
-	// ask-timeout fails the whole invoke (no partial-cleartext
-	// hand-off). Cleartext lives in the bindings map during the call
-	// and gets zeroed after.
-	secretCleartexts, secretErr := d.resolveSecretBindings(req.SecretBindings, principalKind, principalID)
+	// Resolve secret bindings before launching the invoke. The server hands back
+	// the connection's bound {name: secret_id} map (autofillCreds) so the agent
+	// need not pass --secret at all; we merge it UNDER any explicit --secret the
+	// caller supplied (explicit wins on a name collision). Each secret_id — however
+	// it got here — goes through the server's Authorize() (secret.use) check; deny
+	// or ask-timeout fails the whole invoke (no partial-cleartext hand-off).
+	// Cleartext lives in the bindings map during the call and gets zeroed after.
+	bindings := mergeSecretBindings(autofillCreds, req.SecretBindings)
+	secretCleartexts, secretErr := d.resolveSecretBindings(bindings, principalKind, principalID)
 	if secretErr != nil {
 		sendControl(conn, ipcResponse{
 			Type:            "error",
@@ -1901,10 +1953,10 @@ func (d *Daemon) handleApprovePermissionRequest(conn net.Conn, req ipcRequest) {
 	}
 
 	payload := map[string]interface{}{
-		"request_id":            req.ApproveRequestID,
-		"ai_agent_instance_id":  principalID,
-		"decision":              req.ApproveDecision,
-		"reason":                req.ApproveReason,
+		"request_id":           req.ApproveRequestID,
+		"ai_agent_instance_id": principalID,
+		"decision":             req.ApproveDecision,
+		"reason":               req.ApproveReason,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -1931,10 +1983,21 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 		return
 	}
 
+	// Resolve who is making this call from the IPC caller's process tree: an
+	// agent that shelled out `hearth hh …` resolves to its agent principal, a
+	// human at the terminal to the host owner. Authoritative and unforgeable —
+	// the CLI sends no claim; identity comes from peer creds + the tree walk.
+	// The relay authorizes household CRUD against this principal.
+	principalKind, principalID, identityErr := d.derivePrincipal(conn, "", "", "ws_request:"+req.WSMsgType)
+	if identityErr != nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: identityErr.Message})
+		return
+	}
+
 	// create_ai_agent_instance gets special treatment: the daemon pre-checks
 	// host locality, forwards the create, then spawns the agent process.
 	if req.WSMsgType == "create_ai_agent_instance" {
-		d.handleCreateAgentInstance(conn, req)
+		d.handleCreateAgentInstance(conn, req, principalKind, principalID)
 		return
 	}
 
@@ -1960,12 +2023,40 @@ func (d *Daemon) handleWSRequest(conn net.Conn, req ipcRequest) {
 	}
 
 	correlationID := generateUUID()
-	resp, err := d.daemonWS.SendWSRequest(correlationID, req.WSMsgType, req.WSData)
+	// A gated household CRUD msg_type can block server-side on owner approval
+	// (relay routeHouseholdCRUDAsk), so it needs the long ask window rather than
+	// the 30s CRUD default. Non-gated requests return fast, so the longer cap is
+	// only ever reached when a human is actually being asked.
+	timeout := defaultWSRequestTimeout
+	if gatedHouseholdCRUD[req.WSMsgType] {
+		timeout = householdCRUDAskTimeout
+	}
+	resp, err := d.daemonWS.SendWSRequestTimeoutAs(correlationID, req.WSMsgType, req.WSData, principalKind, principalID, timeout)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
 		return
 	}
 	sendControl(conn, ipcResponse{Type: "ws_response", Data: json.RawMessage(resp)})
+}
+
+// householdCRUDAskTimeout is the daemon-side wait for a gated household CRUD
+// ws_request that the relay may route to the owner for approval. Mirrors
+// askWSRequestTimeout (resource_authorize.go) for the resource-invoke ask path.
+const householdCRUDAskTimeout = 12 * time.Minute
+
+// gatedHouseholdCRUD is the set of mutating msg_types the relay gates through
+// the owner-approval flow; each can block on a human response. Mirrors
+// householdCRUDGates in relay/cmd/hearth-cloud/crud_authz.go — keep in sync.
+var gatedHouseholdCRUD = map[string]bool{
+	"create_ai_agent_instance": true, "create_temp_agent_instance": true,
+	"update_ai_agent_instance": true, "retire_ai_agent_instance": true,
+	"wake_ai_agent_instance": true, "sleep_ai_agent_instance": true,
+	"create_organization_position": true, "update_organization_position": true, "eliminate_organization_position": true,
+	"create_working_directory": true, "find_or_create_working_directory": true, "update_working_directory": true, "abandon_working_directory": true,
+	"create_ai_brain_model": true, "update_ai_brain_model": true, "archive_ai_brain_model": true,
+	"create_agent_job_description": true, "update_agent_job_description": true, "archive_agent_job_description": true,
+	"update_organization": true, "archive_organization": true,
+	"add_organization_member": true, "remove_organization_member": true,
 }
 
 // handleIdentity returns the daemon's cached account/org state along with
@@ -2013,7 +2104,7 @@ func (d *Daemon) handleIdentity(conn net.Conn) {
 		StartedAt:     d.startedAt.Format(time.RFC3339),
 		WSConnected:   wsConnected,
 		ServerURL:     wsURL,
-		AgentHomePath:  agentHome,
+		AgentHomePath: agentHome,
 	})
 }
 
@@ -2082,6 +2173,29 @@ func stopDaemon() {
 		return
 	}
 
+	// Tell the human why a stop can hang: the daemon asks each running agent
+	// to wrap up gracefully (SIGTERM, then up to 10s before a forced kill),
+	// one after another. A stop with no agents is instant and says nothing
+	// extra.
+	n := len(resp.Instances)
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "hearth: stopping host — draining %s (up to 10s each):\n", plural(n, "agent", "agents"))
+		// List them when few; a big fleet would just be noise, so summarize.
+		if n <= 5 {
+			for _, inst := range resp.Instances {
+				label := inst.Project
+				if label == "" {
+					label = inst.AIAgentInstanceID
+				}
+				agent := inst.Agent
+				if agent == "" {
+					agent = "agent"
+				}
+				fmt.Fprintf(os.Stderr, "hearth:   • %s (%s)\n", label, agent)
+			}
+		}
+	}
+
 	// The daemon writes "ok" before its listener actually unbinds, so a
 	// rapid follow-up `start` would otherwise see the socket still
 	// accepting connections and report "already running". Poll until the
@@ -2089,11 +2203,17 @@ func stopDaemon() {
 	// cover Shutdown's worst case: per-agent SIGTERM grace (agentStopGrace,
 	// 10s) iterated serially across running instances, plus WS round-trips.
 	deadline := time.Now().Add(60 * time.Second)
+	start := time.Now()
+	nextHeartbeat := 5 * time.Second // reassure that a long drain isn't a hang
 	stopped := false
 	for time.Now().Before(deadline) {
 		if !isDaemonRunning() {
 			stopped = true
 			break
+		}
+		if n > 0 && time.Since(start) >= nextHeartbeat {
+			fmt.Fprintf(os.Stderr, "hearth:   … still draining (%ds)\n", int(time.Since(start).Seconds()))
+			nextHeartbeat += 5 * time.Second
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -2102,6 +2222,15 @@ func stopDaemon() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "hearth: host stopped\n")
+}
+
+// plural renders "1 agent" / "3 agents" — a small helper so the stop output
+// reads naturally regardless of count.
+func plural(n int, singular, pluralForm string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %s", n, pluralForm)
 }
 
 // reloadDaemonCredentials sends the daemon a reload_credentials IPC

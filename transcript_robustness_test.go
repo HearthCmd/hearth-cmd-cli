@@ -2,13 +2,10 @@
 
 package main
 
-// Unit coverage for two transcript-pipeline fixes:
+// Unit coverage for a transcript-pipeline fix:
 //   - parseStreamPID: the orphan-reaper PID-file parser (O1). The reaper used
 //     to Atoi the WHOLE "<pid> <uuid>" file and always failed, so it never
 //     reaped a leaked `hearth stream` process after a daemon crash.
-//   - talkModel reconnect: the TUI's `subscribed` set must reset on every
-//     (re)connect (T1), or the TUI goes silent after the first reconnect
-//     because it thinks it's still subscribed and never re-sends subscribe_agent.
 
 import "testing"
 
@@ -34,26 +31,5 @@ func TestParseStreamPID(t *testing.T) {
 				t.Errorf("parseStreamPID(%q) = %d, want %d", c.in, got, c.want)
 			}
 		})
-	}
-}
-
-// TestTalkModelReconnectResetsSubscriptions pins T1: a fresh connect clears the
-// stale subscription record so the ai_agent_instances_list the server pushes on
-// connect drives applyInstances to re-subscribe. Without the reset, the second
-// connection never re-subscribes and the transcript freezes.
-func TestTalkModelReconnectResetsSubscriptions(t *testing.T) {
-	m := talkModel{
-		subscribed: map[string]bool{"agent-a": true, "agent-b": true},
-	}
-	updated, _ := m.Update(wsConnectedMsg{})
-	tm, ok := updated.(talkModel)
-	if !ok {
-		t.Fatalf("Update returned %T, want talkModel", updated)
-	}
-	if len(tm.subscribed) != 0 {
-		t.Fatalf("subscribed not cleared on connect: %v", tm.subscribed)
-	}
-	if tm.status != "Connected" {
-		t.Errorf("status = %q, want Connected", tm.status)
 	}
 }

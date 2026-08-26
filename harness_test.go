@@ -2,10 +2,10 @@
 
 package main
 
-// Coverage for the small pure helpers in agent.go and select.go that we
+// Coverage for the small pure helpers in agent.go and lookups.go that we
 // rely on at the daemon's spawn path. Each is a pure mapping over a known
 // set of harness/agent strings; getting one wrong silently routes spawns
-// to the wrong binary or skips the model picker for the wrong harness.
+// to the wrong binary or drops a supplied --model for the wrong harness.
 
 import (
 	"os"

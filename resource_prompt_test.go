@@ -259,11 +259,18 @@ func TestBuildResourcePluginPrompt_RendersEntitiesAndCredentials(t *testing.T) {
 		"Entities:",
 		"light.kitchen  (kind=ha.light, area=kitchen)",
 		"lock.front_door  (kind=ha.lock, parent=area:entry)",
-		"--secret <env>=<id>",
-		"hearth secret list",
+		// Autofill: the credential is supplied automatically; the agent is told
+		// it does not pass one (see resource-credential-autofill).
+		"supplied automatically",
 	} {
 		if !strings.Contains(got, needle) {
 			t.Errorf("prompt missing %q\nfull:\n%s", needle, got)
+		}
+	}
+	// The agent is no longer instructed to look up / pass a secret by hand.
+	for _, gone := range []string{"--secret", "hearth secret list"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("prompt should no longer mention %q (autofill handles it)\nfull:\n%s", gone, got)
 		}
 	}
 }

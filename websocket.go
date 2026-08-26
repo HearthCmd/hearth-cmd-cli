@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 // WSMode controls the directionality of the WebSocket connection.
@@ -423,7 +423,7 @@ func (c *WSClient) connectAndRead(firstConnect bool) error {
 
 	conn, _, err := websocket.Dial(dialCtx, dialURL, opts)
 	if err == nil {
-		// nhooyr defaults to a 32 KiB read limit which is well under
+		// coder/websocket defaults to a 32 KiB read limit which is well under
 		// what real server payloads need (plugin install reports,
 		// resource_connections lists, agent_resource_grants fetches
 		// have all grown past that as the schema expanded). Match

@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -96,24 +95,33 @@ func (d *DaemonWS) replayTranscriptHistory(aiAgentInstanceID string, limit int) 
 	}
 
 	agentLabel := aw.agent // already the server-side label
+	emitted := emitReplayFrames(xform, agentLabel, lines, baseIndex, aw.SendText)
+	log.Printf("daemon-ws: replayed %d history entries for instance %s (read %d, agent=%s)", emitted, aiAgentInstanceID, len(lines), aw.agent)
+}
+
+// emitReplayFrames transforms each raw JSONL line and hands each resulting
+// entry to send as a retry:true transcript frame, returning the number sent.
+// Split out of replayTranscriptHistory (and decoupled from file IO / harness
+// path resolution) so the retry-tagging — the safeguard that stops a history
+// replay from re-triggering native @mention pushes — is unit-testable.
+//
+// retry:true is non-negotiable here: every entry replayed for a
+// newly-connected device was already processed live once, so the relay must
+// treat it as a re-send, not a new event. baseIndex+i reproduces the same
+// `seq` the live tail assigned, so replay and live entries dedup and order
+// identically on the client.
+func emitReplayFrames(xform StreamTransformer, agentLabel string, lines []string, baseIndex int, send func([]byte)) int {
 	emitted := 0
 	for i, line := range lines {
-		// baseIndex+i is the line's absolute 0-based position in the file —
-		// the same `seq` the live tail assigns to this entry, so the two
-		// paths' entries dedup and order identically on the client.
 		for _, transformed := range transformLineWithSeq(xform, line, baseIndex+i) {
 			if len(transformed) == 0 {
 				continue
 			}
-			// Match the live-tail wire format in bridge.go so the server
-			// processes both replay and live entries through identical
-			// code.
-			frame := fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agentLabel, string(transformed))
-			aw.SendText([]byte(frame))
+			send(transcriptFrame(agentLabel, string(transformed), true))
 			emitted++
 		}
 	}
-	log.Printf("daemon-ws: replayed %d history entries for instance %s (read %d, agent=%s)", emitted, aiAgentInstanceID, len(lines), aw.agent)
+	return emitted
 }
 
 // runtimeAgentFromServerName inverts agentServerName so we can recover the

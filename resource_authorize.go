@@ -97,6 +97,40 @@ type authorizeResourceInvokeResp struct {
 	// when no binding exists (Shape A connections, human principals).
 	// Phase 3 step 5.
 	BindingID string `json:"binding_id,omitempty"`
+	// Credentials is the connection's bound {credential_name: secret_id}
+	// map, returned on Allow so the daemon autofills the credential the
+	// agent would otherwise pass by hand as --secret. Secret IDs only,
+	// never material; each still goes through the secret.use-gated
+	// secrets_get before local decrypt. nil when the connection is
+	// unbound or the server predates autofill (then the caller falls
+	// back to its own --secret bindings).
+	Credentials map[string]string `json:"credentials,omitempty"`
+}
+
+// mergeSecretBindings folds server-provided autofill credentials UNDER the
+// caller's explicit --secret bindings: autofill supplies names the caller didn't
+// pass, and an explicit binding wins on any name collision (so `--secret` stays a
+// real override). Empty name/id on either side is dropped. Returns nil when nothing
+// survives, so resolveSecretBindings keeps its no-op fast path.
+func mergeSecretBindings(autofill, explicit map[string]string) map[string]string {
+	if len(autofill) == 0 && len(explicit) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(autofill)+len(explicit))
+	for k, v := range autofill {
+		if k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	for k, v := range explicit {
+		if k != "" && v != "" {
+			out[k] = v // explicit --secret overrides autofill on a name collision
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // preflightAuthorizeResourceInvoke is the 1e stopgap chokepoint
@@ -109,20 +143,22 @@ type authorizeResourceInvokeResp struct {
 // args carries the verb's argument JSON, plumbed in 1h-commit-5 so
 // Ask-path renders can show the human what they're approving.
 // Empty when the invoke has no args.
-// Returns (bindingID, *PluginError). bindingID is the server-resolved
-// agent_resource_bindings row id for this invoke, or "" when the
-// server didn't populate one (Shape A, human principals, server
-// running pre-step-5). Caller threads it into PluginSupervisor.Invoke
-// so plugin StateGet/Put RPCs scope correctly.
-func (d *Daemon) preflightAuthorizeResourceInvoke(ws authzWS, principalKind, principalID, connID, pluginType, verb string, args json.RawMessage, claimedAgentInstanceID string) (string, *PluginError) {
+// Returns (bindingID, autofillCreds, *PluginError). bindingID is the
+// server-resolved agent_resource_bindings row id for this invoke, or ""
+// when the server didn't populate one (Shape A, human principals, server
+// running pre-step-5); the caller threads it into PluginSupervisor.Invoke
+// so plugin StateGet/Put RPCs scope correctly. autofillCreds is the
+// connection's bound {credential_name: secret_id} map on Allow (nil
+// otherwise), which the caller merges under any explicit --secret.
+func (d *Daemon) preflightAuthorizeResourceInvoke(ws authzWS, principalKind, principalID, connID, pluginType, verb string, args json.RawMessage, claimedAgentInstanceID string) (string, map[string]string, *PluginError) {
 	if ws == nil || !ws.IsConnected() {
-		return "", &PluginError{
+		return "", nil, &PluginError{
 			Code:    ErrUnavailable,
 			Message: "daemon is offline from server; authorize is unavailable",
 		}
 	}
 	if principalID == "" {
-		return "", &PluginError{
+		return "", nil, &PluginError{
 			Code:    ErrUnauthorized,
 			Message: "no authenticated principal; run `hearth login` first",
 		}
@@ -146,35 +182,35 @@ func (d *Daemon) preflightAuthorizeResourceInvoke(ws authzWS, principalKind, pri
 		AIAgentInstanceID: claimedAgentInstanceID,
 	})
 	if err != nil {
-		return "", &PluginError{Code: ErrInternal, Message: "marshal authorize request: " + err.Error()}
+		return "", nil, &PluginError{Code: ErrInternal, Message: "marshal authorize request: " + err.Error()}
 	}
 	raw, err := ws.SendWSRequestTimeout(generateUUID(), "authorize_resource_invoke", payload, askWSRequestTimeout)
 	if err != nil {
 		if strings.Contains(err.Error(), "timed out") {
-			return "", &PluginError{
+			return "", nil, &PluginError{
 				Code:    ErrUnavailable,
 				Message: "no response from server (daemon-side timeout; check daemon WS connectivity)",
 			}
 		}
-		return "", &PluginError{Code: ErrUnavailable, Message: "authorize ws_request: " + err.Error()}
+		return "", nil, &PluginError{Code: ErrUnavailable, Message: "authorize ws_request: " + err.Error()}
 	}
 	var resp authorizeResourceInvokeResp
 	if err := json.Unmarshal(raw, &resp); err != nil {
-		return "", &PluginError{Code: ErrInternal, Message: "decode authorize response: " + err.Error()}
+		return "", nil, &PluginError{Code: ErrInternal, Message: "decode authorize response: " + err.Error()}
 	}
 	if resp.Type == "error" {
-		return "", &PluginError{Code: ErrInternal, Message: "server authorize error: " + resp.Error}
+		return "", nil, &PluginError{Code: ErrInternal, Message: "server authorize error: " + resp.Error}
 	}
 	switch resp.Decision {
 	case "allow":
-		return resp.BindingID, nil
+		return resp.BindingID, resp.Credentials, nil
 	case "deny":
-		return "", &PluginError{
+		return "", nil, &PluginError{
 			Code:    ErrForbidden,
 			Message: humanReadableDenyMessage(resp.Reason),
 		}
 	default:
-		return "", &PluginError{
+		return "", nil, &PluginError{
 			Code:    ErrInternal,
 			Message: "unexpected authorize decision: " + resp.Decision,
 		}

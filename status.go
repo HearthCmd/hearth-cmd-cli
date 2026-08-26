@@ -452,7 +452,7 @@ func printFleetAgentsSection(out *os.File, instances []instancesListEntry, hosts
 	})
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  ID\tNAME\tHOST\tSTATUS\tPID\tLAST ACTIVITY\tEPHEMERAL\t")
+	fmt.Fprintln(tw, "  ID\tNAME\tHOST\tSTATUS\tPID\tLAST ACTIVITY\tTEMP\t")
 	for _, a := range instances {
 		host := hostNames[a.HostID]
 		if host == "" {

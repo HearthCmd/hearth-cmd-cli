@@ -38,10 +38,10 @@ func (s *stubWS) SendText(data []byte) {
 	s.sends = append(s.sends, cp)
 }
 
-func (s *stubWS) Send(data []byte)                              { s.SendText(data) }
-func (s *stubWS) RegisterPending(_ string) <-chan []byte        { return nil }
-func (s *stubWS) RemovePending(_ string)                        {}
-func (s *stubWS) Close()                                        {}
+func (s *stubWS) Send(data []byte)                       { s.SendText(data) }
+func (s *stubWS) RegisterPending(_ string) <-chan []byte { return nil }
+func (s *stubWS) RemovePending(_ string)                 {}
+func (s *stubWS) Close()                                 {}
 
 func (s *stubWS) snapshot() []string {
 	s.mu.Lock()
@@ -99,6 +99,7 @@ func TestTailBridge_FramesCompleteLines(t *testing.T) {
 	for i, frame := range got[:2] {
 		var msg struct {
 			Type  string          `json:"type"`
+			Retry bool            `json:"retry"`
 			Agent string          `json:"agent"`
 			Data  json.RawMessage `json:"data"`
 		}
@@ -108,6 +109,11 @@ func TestTailBridge_FramesCompleteLines(t *testing.T) {
 		}
 		if msg.Type != "transcript" {
 			t.Errorf("frame %d type = %q, want transcript", i, msg.Type)
+		}
+		// Live-tail frames must never be retry-tagged — that flag is the relay's
+		// signal to suppress the @mention push, and these are genuine sends.
+		if msg.Retry {
+			t.Errorf("frame %d is retry:true; live-tail frames must not be (%q)", i, frame)
 		}
 		if msg.Agent != "claude" {
 			t.Errorf("frame %d agent = %q, want claude", i, msg.Agent)

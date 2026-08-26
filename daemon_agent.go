@@ -48,8 +48,12 @@ func localAgentForHarness(harness string) string {
 // be this daemon), and the existing wake handler takes over. The CLI simply
 // relays the server's response — caller sees spawn_error if the target
 // daemon was offline.
-func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
-	resp, err := d.daemonWS.SendWSRequest(generateUUID(), "create_ai_agent_instance", req.WSData)
+func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest, principalKind, principalID string) {
+	// Carry the resolved caller principal so the relay gates agent-initiated
+	// agent creation (an agent spawning agents) against the agent principal
+	// rather than the host owner it would otherwise inherit. create can block
+	// on owner approval, so use the long ask timeout (not the 30s default).
+	resp, err := d.daemonWS.SendWSRequestTimeoutAs(generateUUID(), "create_ai_agent_instance", req.WSData, principalKind, principalID, householdCRUDAskTimeout)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
 		return
@@ -59,8 +63,8 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest) {
 
 // spawnAgentInstance creates a fully-functioning agent instance with the full
 // daemon machinery (interpose hook, transcript bridge, WS registration with
-// the server). The PTY runs detached in the background; the phone and
-// `hearth talk` drive it.
+// the server). The PTY runs detached in the background; the phone drives
+// it (or `hearth hh agent attach` for debugging).
 //
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.

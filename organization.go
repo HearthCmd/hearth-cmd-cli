@@ -14,6 +14,21 @@ import (
 	"time"
 )
 
+// repeatedStringFlag collects a flag that may be passed multiple times; each
+// value may also be a comma-separated list. Empty/whitespace parts are dropped.
+type repeatedStringFlag []string
+
+func (r *repeatedStringFlag) String() string { return strings.Join(*r, ",") }
+
+func (r *repeatedStringFlag) Set(v string) error {
+	for _, part := range strings.Split(v, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			*r = append(*r, part)
+		}
+	}
+	return nil
+}
+
 // sendWSRequest connects to the daemon IPC socket and sends a ws_request,
 // returning the raw JSON response from the server.
 func sendWSRequest(msgType string, data map[string]interface{}) (json.RawMessage, error) {
@@ -124,7 +139,7 @@ func runCreateOrUpdateWithCollisionPrompt(msgType, entityLabel, removeVerb, name
 
 // sendCreateOrUpdateResolvingCollision is the same flow but returns the final
 // response body instead of printing it, so callers with their own
-// post-processing (e.g. agent create launching `talk` on the new row) can
+// post-processing (e.g. temp-agent create printing the new row) can
 // still use the collision prompt without losing control of stdout. Exits
 // the process on transport errors or user cancellation.
 func sendCreateOrUpdateResolvingCollision(msgType, entityLabel, removeVerb, nameField string, payload map[string]interface{}) json.RawMessage {
@@ -469,6 +484,8 @@ func runOrganization(args []string) {
 		runOrganizationAgent(args[1:])
 	case "ai_model":
 		runOrganizationModel(args[1:])
+	case "harness":
+		runOrganizationHarness(args[1:])
 	case "host":
 		runOrganizationHost(args[1:])
 	case "device":
@@ -572,6 +589,7 @@ Entities:
   position         Household positions (org chart slots)
   agent            AI agent instances
   ai_model         AI brain models (read-only)
+  harness          Agent runtimes (read-only)
   host             Enrolled hosts (list, get, transfer, check)
   device           io_devices in the current household (read-only)
 
@@ -618,11 +636,7 @@ func runOrganizationOrg(args []string) {
 		name := fs.String("name", "", "Household name")
 		fs.Parse(args[1:])
 		if *name == "" {
-			reader := bufio.NewReader(os.Stdin)
-			*name = promptLine(reader, "Name: ")
-		}
-		if *name == "" {
-			fmt.Fprintf(os.Stderr, "hearth: name required\n")
+			fmt.Fprintf(os.Stderr, "hearth: --name required\n")
 			os.Exit(1)
 		}
 		data, err := sendWSRequest("create_organization", map[string]interface{}{"name": *name})
@@ -708,11 +722,7 @@ func runOrganizationUser(args []string) {
 		orgID := requireWorkingOrgID()
 
 		if *name == "" {
-			reader := bufio.NewReader(os.Stdin)
-			*name = promptLine(reader, "Name: ")
-		}
-		if *name == "" {
-			fmt.Fprintf(os.Stderr, "hearth: name required\n")
+			fmt.Fprintf(os.Stderr, "hearth: --name required\n")
 			os.Exit(1)
 		}
 
@@ -782,12 +792,8 @@ func runOrganizationJob(args []string) {
 
 		orgID := requireWorkingOrgID()
 
-		reader := bufio.NewReader(os.Stdin)
 		if *title == "" {
-			*title = promptLine(reader, "Title: ")
-		}
-		if *title == "" {
-			fmt.Fprintf(os.Stderr, "hearth: title required\n")
+			fmt.Fprintf(os.Stderr, "hearth: --title required\n")
 			os.Exit(1)
 		}
 
@@ -880,40 +886,39 @@ func runOrganizationPos(args []string) {
 		printJSON(data)
 	case "create":
 		fs := flag.NewFlagSet("pos create", flag.ExitOnError)
-		jobID := fs.String("job", "", "Agent job description ID (required; prompted if unset)")
-		wdID := fs.String("wd", "", "Working directory ID (optional; if unset, you'll be prompted for a directory path)")
+		jobID := fs.String("job", "", "Agent job description ID (required)")
+		wdID := fs.String("wd", "", "Working directory ID (optional; else --wd-path, else derived from the job title)")
+		wdPath := fs.String("wd-path", "", "Directory path to find-or-create the working directory at (optional; overrides the path derived from the job title)")
 		parentID := fs.String("parent", "", "Parent position ID (optional)")
 		hostID := fs.String("host-id", "", "Host on which to find-or-create the working directory (defaults to this host)")
 		fs.Parse(args[1:])
 
 		orgID := requireWorkingOrgID()
 
-		// Positions no longer have a name of their own — their display
-		// label is the title of the linked job description. Require a JD
-		// (pick existing or create inline) before anything else so the
-		// working-directory default can snake_case its title.
 		if *jobID == "" {
-			id, err := selectAgentJobDescription(orgID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			*jobID = id
-		}
-
-		jdTitle, err := fetchAgentJobDescriptionTitle(*jobID)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-			os.Exit(1)
-		}
-		dirSuggestion := toSnakeCase(jdTitle)
-		if dirSuggestion == "" {
-			fmt.Fprintf(os.Stderr, "hearth: job description title must contain at least one alphanumeric character\n")
+			fmt.Fprintf(os.Stderr, "hearth: --job required\n")
 			os.Exit(1)
 		}
 
+		// Positions carry no name of their own — the linked job description's
+		// title is the display label, and (absent --wd/--wd-path) the source of
+		// the default working-directory path.
 		if *wdID == "" {
-			id, err := findOrCreateWorkingDirectoryByPath(orgID, *hostID, dirSuggestion)
+			dir := *wdPath
+			if dir == "" {
+				jdTitle, err := fetchAgentJobDescriptionTitle(*jobID)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
+					os.Exit(1)
+				}
+				sub := toSnakeCase(jdTitle)
+				if sub == "" {
+					fmt.Fprintf(os.Stderr, "hearth: job description title must contain at least one alphanumeric character (or pass --wd/--wd-path)\n")
+					os.Exit(1)
+				}
+				dir = defaultAgentWorkingDirFor(orgSlugForID(orgID), sub)
+			}
+			id, err := findOrCreateWorkingDirectory(orgID, *hostID, dir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
 				os.Exit(1)
@@ -992,7 +997,12 @@ func runOrganizationAgent(args []string) {
 		modelID := fs.String("model", "", "AI brain model ID")
 		harnessID := fs.String("harness", "", "Harness ID")
 		name := fs.String("name", "", "Human-readable name")
-		hostID := fs.String("host-id", "", "Host on which the agent should run (defaults to this host; picker only — new hosts must be enrolled via 'hearth start' on that machine)")
+		// D2e talk allowlists (§4.2). Repeatable; comma-separated values also
+		// accepted. Both directions are needed for an actual agent→agent wake.
+		var canBeWokenBy, canSendTo repeatedStringFlag
+		fs.Var(&canBeWokenBy, "can-be-woken-by", "Agent, household member, or shared-device ID allowed to wake this agent (repeatable). Discover ids with 'hearth hh agent list' / 'hearth hh user list' / 'hearth hh device list'.")
+		fs.Var(&canSendTo, "can-send-to", "Agent ID this agent may send to / wake (repeatable). Agents only; discover ids with 'hearth hh agent list'.")
+		hostID := fs.String("host-id", "", "Host on which the agent should run (defaults to this host; new hosts must be enrolled via 'hearth start' on that machine — list ids with 'hearth hh host list')")
 		temp := fs.Bool("temp", false, "Skip all prompts and spawn a disposable agent in the current directory (override with --wd). Flags still override individual defaults; unset ones fall back to: host=this host, harness=first listed, model=first listed, name='Temp <id>'. Temp agents auto-rename from their first user message and group separately in the iOS agent list.")
 		wd := fs.String("wd", "", "Working directory for the temp agent (defaults to the current directory). Repeat invocations in the same directory reuse the wd row; if an agent is already active there you'll be asked whether to sleep it and replace.")
 		fs.Parse(args[1:])
@@ -1004,7 +1014,7 @@ func runOrganizationAgent(args []string) {
 		// --temp takes a dedicated server endpoint that atomically creates
 		// wd + position + instance and pushes the spawn to the daemon. All
 		// we do locally is choose defaults for unset flags and shell out
-		// to the create, then land the user in talk.
+		// to the create, then print the new row.
 		if *temp {
 			if err := runTempCreate(orgID, *name, *hostID, *harnessID, *modelID, *wd, reader); err != nil {
 				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
@@ -1014,65 +1024,51 @@ func runOrganizationAgent(args []string) {
 		}
 
 		if *name == "" {
-			*name = promptLine(reader, "Agent Name: ")
-		}
-		if *name == "" {
-			fmt.Fprintf(os.Stderr, "hearth: name required\n")
+			fmt.Fprintf(os.Stderr, "hearth: --name required\n")
 			os.Exit(1)
 		}
 
-		// Host — cursor defaults to this daemon's host_id. No "create new"
-		// entry; a new host has to be enrolled out-of-band by running
-		// 'hearth start' on the target machine.
+		// Host defaults to this daemon's host. A different host must already
+		// be enrolled out-of-band ('hearth start' on that machine); there's no
+		// picker. Discover ids with 'hearth hh host list'.
 		if *hostID == "" {
-			id, err := selectHost(readConfigValue("host_id"))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			*hostID = id
+			*hostID = readConfigValue("host_id")
+		}
+		if *hostID == "" {
+			fmt.Fprintf(os.Stderr, "hearth: --host-id required (run 'hearth start' to enroll this host)\n")
+			os.Exit(1)
 		}
 
-		var harnessName string
+		// Harness and position are required flags — discover ids with
+		// 'hearth hh harness list' and 'hearth hh position list' (or create a
+		// position with 'hearth hh position create').
 		if *harnessID == "" {
-			id, name, err := selectHarness()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			*harnessID = id
-			harnessName = name
-		} else {
-			name, err := harnessNameByID(*harnessID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			harnessName = name
+			fmt.Fprintf(os.Stderr, "hearth: --harness required (list ids with 'hearth hh harness list')\n")
+			os.Exit(1)
 		}
-
-		if *modelID == "" && harnessHonorsModelEnv(harnessName) {
-			id, err := selectAIBrainModel(orgID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			*modelID = id
-		}
-
 		if *posID == "" {
-			id, err := selectOrganizationPosition(orgID, *hostID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-				os.Exit(1)
-			}
-			*posID = id
+			fmt.Fprintf(os.Stderr, "hearth: --pos required (list ids with 'hearth hh position list')\n")
+			os.Exit(1)
+		}
+
+		// claude-code / codex honor a model env var, so the server requires
+		// ai_brain_model_id for them; harness-managed runtimes (copilot, etc.)
+		// leave it NULL. Resolve the harness name (also validates the id) and
+		// fail fast with a helpful message rather than surfacing a raw server
+		// rejection when --model is missing for a model-honoring harness.
+		harnessName, err := harnessNameByID(*harnessID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
+			os.Exit(1)
+		}
+		if *modelID == "" && harnessHonorsModelEnv(harnessName) {
+			fmt.Fprintf(os.Stderr, "hearth: --model required for harness %s (list ids with 'hearth hh ai_model list')\n", harnessName)
+			os.Exit(1)
 		}
 
 		// The daemon will spawn the harness with cwd set to the position's
-		// working_directory. Make sure that directory exists on disk first —
-		// prompt the user to create it if it doesn't, and bail otherwise.
-		if err := ensureWorkingDirOnDisk(reader, *posID); err != nil {
+		// working_directory. Make sure that directory exists on disk first.
+		if err := ensureWorkingDirOnDisk(*posID); err != nil {
 			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
 			os.Exit(1)
 		}
@@ -1085,6 +1081,12 @@ func runOrganizationAgent(args []string) {
 		}
 		if *modelID != "" {
 			payload["ai_brain_model_id"] = *modelID
+		}
+		if len(canBeWokenBy) > 0 {
+			payload["talk_inbound_ids"] = []string(canBeWokenBy)
+		}
+		if len(canSendTo) > 0 {
+			payload["talk_outbound_agent_ids"] = []string(canSendTo)
 		}
 		data := sendCreateOrUpdateResolvingCollision("create_ai_agent_instance", "agent", "retire", "name", payload)
 		printJSON(data)
@@ -1204,6 +1206,46 @@ func runOrganizationModel(args []string) {
 	}
 }
 
+// =============================================================================
+// harness — agent runtimes (read-only). Exposed so the flag-driven
+// `hh agent create --harness <id>` flow has a way to discover ids now that
+// the interactive picker is gone.
+// =============================================================================
+
+func runOrganizationHarness(args []string) {
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintf(os.Stderr, "Usage: hearth hh harness <list|get>\n")
+		os.Exit(0)
+	}
+	switch args[0] {
+	case "list":
+		// Harnesses are global (not org-scoped), so no --household flag.
+		data, err := sendWSRequest("list_harnesses", nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	case "get":
+		fs := flag.NewFlagSet("harness get", flag.ExitOnError)
+		id := fs.String("id", "", "Harness ID")
+		fs.Parse(args[1:])
+		if *id == "" {
+			fmt.Fprintf(os.Stderr, "hearth: --id required\n")
+			os.Exit(1)
+		}
+		data, err := sendWSRequest("get_harness", map[string]interface{}{"id": *id})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
+			os.Exit(1)
+		}
+		printJSON(data)
+	default:
+		fmt.Fprintf(os.Stderr, "hearth hh harness: unknown command %q\n", args[0])
+		os.Exit(1)
+	}
+}
+
 // resolveAgentWorkingDir looks up the working_directory path and host_id
 // for an agent instance. Returns empty strings on any lookup error — callers
 // should treat that as "skip wd-related behavior" rather than fatal.
@@ -1248,12 +1290,12 @@ func resolveAgentWorkingDir(agentInstanceID string) (string, string) {
 	return wdWrap.WorkingDirectory.DirectoryPath, wdWrap.WorkingDirectory.HostID
 }
 
-// ensureWorkingDirOnDisk resolves the position's working_directory path,
-// checks if it exists locally, and prompts the user to create it if missing.
-// No-ops silently when the WD belongs to a different host (the daemon on that
-// host owns its own disk). Returns an error if the user declines or the
-// lookup/mkdir fails.
-func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
+// ensureWorkingDirOnDisk resolves the position's working_directory path and
+// creates it locally if missing (the daemon needs it to exist to spawn the
+// agent there). No-ops silently when the WD belongs to a different host (the
+// daemon on that host owns its own disk). Returns an error only on a
+// lookup/mkdir failure — creation is unconditional, no prompt.
+func ensureWorkingDirOnDisk(positionID string) error {
 	posData, err := sendWSRequest("get_organization_position", map[string]interface{}{"id": positionID})
 	if err != nil {
 		return fmt.Errorf("failed to fetch organization_position: %w", err)
@@ -1315,10 +1357,6 @@ func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
 		return fmt.Errorf("stat %s: %w", dir, err)
 	}
 
-	answer := strings.ToLower(strings.TrimSpace(promptLine(reader, fmt.Sprintf("Directory %q doesn't exist. Create it? (Y/n): ", dir))))
-	if answer == "n" || answer == "no" {
-		return fmt.Errorf("aborted: working directory does not exist")
-	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s: %w", dir, err)
 	}
@@ -1332,8 +1370,8 @@ func ensureWorkingDirOnDisk(reader *bufio.Reader, positionID string) error {
 
 // runTempCreate fills unset flags with defaults, sends the single-shot
 // create_temp_agent_instance ws_request (server creates wd + position +
-// instance atomically and pushes the spawn to the daemon on host_id), and
-// then execs `hearth talk --focus <id>`. Explicit flags win — any non-zero
+// instance atomically and pushes the spawn to the daemon on host_id), then
+// prints the created row and exits. Explicit flags win — any non-zero
 // argument is passed through as-is.
 //
 // The wd defaults to pwd (or --wd if supplied). On a collision (an agent is
@@ -1448,8 +1486,8 @@ func runTempCreate(orgID, name, hostID string, harnessID string, modelID, wd str
 			return fmt.Errorf("create_temp_agent_instance: empty id in response")
 		}
 
-		fmt.Fprintf(os.Stderr, "Spawned temp agent %s. Opening talk (agent may take a moment to warm up)…\n", wrap.AIAgentInstance.ID)
-		runTalk([]string{"--focus", wrap.AIAgentInstance.ID})
+		fmt.Fprintf(os.Stderr, "Spawned temp agent %s (it may take a moment to warm up). Watch it from the Hearth app, or attach with: hearth hh agent attach %s\n", wrap.AIAgentInstance.ID, wrap.AIAgentInstance.ID)
+		printJSON(resp)
 		return nil
 	}
 	return fmt.Errorf("create_temp_agent_instance: still blocked after replacing occupant")

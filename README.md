@@ -55,9 +55,9 @@ hearth host start
 hearth hh agent create --temp
 ```
 
-`--temp` creates a working directory entry rooted at the current shell directory (override with `--wd <path>`), a matching position, and the agent itself — all in one step — then drops you into `hearth talk` so you can start chatting. Repeat invocations in the same directory reuse the wd row; if an agent is already active there you'll be asked whether to sleep it and replace. Open the Hearth iOS app to see the agent, approve its tool calls, and watch its transcript live.
+`--temp` creates a working directory entry rooted at the current shell directory (override with `--wd <path>`), a matching position, and the agent itself — all in one step — then prints the new agent row and exits. Repeat invocations in the same directory reuse the wd row; if an agent is already active there you'll be asked whether to sleep it and replace. Open the Hearth iOS app to see the agent, approve its tool calls, and watch its transcript live — or attach a debug terminal with `hearth hh agent attach <id>`.
 
-For a perpetual, named agent instead, run `hearth hh agent create` (interactive) or wire the flags directly (see `--help`).
+For a perpetual, named agent instead, run `hearth hh agent create` with the required flags (`--name --host-id --harness --pos`, plus `--model` where the harness honors it); see `--help`.
 
 ## Commands
 
@@ -69,10 +69,10 @@ hearth <command> [flags]
 |---------|---------|
 | `register <email>` | Enroll this host under a Hearth account. Writes `user_id` and `host_id` to `~/.hearth/config`. |
 | `daemon {start,stop,status}` | Manage the per-host background daemon. |
-| `hh agent create [--temp] [--wd <path>]` | Create an agent. With `--temp`, creates a disposable agent rooted at the current shell directory (or `--wd`) and execs into `talk`. Re-running in the same directory prompts to sleep and replace any active occupant. |
+| `hh agent create [--temp] [--wd <path>]` | Create an agent. With `--temp`, creates a disposable agent rooted at the current shell directory (or `--wd`), prints the new row, and exits. Re-running in the same directory prompts to sleep and replace any active occupant. |
 | `hh {agent,position,wd,user,ai_model,household,host,device,invite,job_description} <list\|get\|create\|update\|delete>` | CRUD on every household entity. |
+| `hh agent attach <id> [--write]` | Attach a debug terminal to a running agent's PTY (claude only today). |
 | `wd create` | Create a bare working directory (without a paired position). |
-| `talk [--focus <id>]` | TUI for live transcripts and sending input to active agents. Tab switches focus. |
 | `update` | Self-update to the latest release. |
 | `version` | Print version and build settings. |
 
@@ -107,7 +107,7 @@ Settings can be provided via flags, environment variables, or the config file. P
 - `/tmp/hearth-bridge-<ai_agent_instance_id>` — per-agent transcript bridge file.
 - `/tmp/hearth-stream-<ai_agent_instance_id>.pid` — PID of the detached transcript streamer.
 - `/tmp/.gl-<hex>` + `/tmp/gl-<hex>.sock` — extracted interpose library and its IPC socket.
-- `$HOME/hearth_agents/<org_slug>/full_time/<name>/` — default path for full-time agent working directories (suggested in the wizard; user can override at the prompt).
+- `$HOME/hearth_agents/<org_slug>/full_time/<name>/` — default path for full-time agent working directories (used when `hh position create` derives a wd from the job title; override with `--wd`/`--wd-path`).
 - `$HOME/hearth_agents/<org_slug>/temp/<shortID>/` — server-minted path for iOS one-tap temp agents (CLI `--temp` defaults to the shell's current directory instead).
 
 hearth also writes a one-time trust-dialog acceptance into `~/.claude.json` for each new cwd before launching claude, and installs a `GEMINI.md` / `AGENTS.md` / `.github/copilot-instructions.md` in the agent's cwd depending on the harness.

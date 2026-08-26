@@ -67,7 +67,7 @@ func buildResourcePluginPrompt(agentID string, grants *AgentGrantsStore, store *
 
 	var b strings.Builder
 	b.WriteString("You can invoke external resources via:\n")
-	b.WriteString("  hearth resource invoke <connection> <verb> [args-json] [--secret <env>=<id>]\n\n")
+	b.WriteString("  hearth resource invoke <connection> <verb> [args-json]\n\n")
 	b.WriteString("<connection> is the identifier listed under \"Available resources\" below — ")
 	b.WriteString("pass it exactly as shown. args-json is a SINGLE JSON object, quoted as one ")
 	b.WriteString("shell argument. There is no --arg flag. Example:\n")
@@ -81,9 +81,8 @@ func buildResourcePluginPrompt(agentID string, grants *AgentGrantsStore, store *
 	b.WriteString("and have their own audit log. Errors come back as ")
 	b.WriteString(`"hearth resource: <code>: <message>" on stderr.`)
 	b.WriteString("\n\n")
-	b.WriteString("When a verb needs a credential (declared per-connection below), look up its ")
-	b.WriteString("secret id with `hearth secret list` and pass `--secret <env>=<id>` on the invoke. ")
-	b.WriteString("The <env> name matches the credential name in the per-connection Credentials block.\n\n")
+	b.WriteString("When a verb needs a credential, it is supplied automatically from the ")
+	b.WriteString("connection you have been granted — you do not pass it. Just invoke the verb.\n\n")
 	b.WriteString("Available resources:\n")
 
 	rendered := 0
@@ -162,12 +161,12 @@ func writeVerbBlock(b *strings.Builder, v PluginVerb) {
 	}
 }
 
-// writeCredentialsBlock renders the per-connection list of credentials
-// the manifest declares so the agent knows what `--secret <env>=<id>`
-// names to pass. Omitted when the manifest declares no credentials.
-// The secret id itself isn't emitted here (it's per-host operator
-// state, fetched via `hearth secret list`); the prompt's preamble
-// covers that workflow.
+// writeCredentialsBlock renders the per-connection list of credentials the
+// manifest declares, so the agent knows what the connection authenticates with.
+// It is informational only now: the credential is supplied automatically from the
+// granted connection (autofill), so the agent passes nothing. The secret id is
+// never emitted here (it's host-only state). Omitted when the manifest declares no
+// credentials.
 func writeCredentialsBlock(b *strings.Builder, creds []PluginCredential) {
 	if len(creds) == 0 {
 		return

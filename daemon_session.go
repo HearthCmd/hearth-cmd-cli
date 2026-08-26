@@ -24,8 +24,8 @@ const agentStopGrace = 10 * time.Second
 // AgentInstance represents a single running agent owned by the daemon.
 // Each AgentInstance corresponds exactly to one ai_agent_instance_id (one
 // conversation) on the server. All instances are detached: the PTY runs
-// in the background and the user interacts via the iOS app or
-// `hearth talk`.
+// in the background and the user interacts via the iOS app (or
+// `hearth hh agent attach` for debugging).
 type AgentInstance struct {
 	aiAgentInstanceID string
 	agent             string

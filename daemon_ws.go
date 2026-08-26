@@ -36,9 +36,20 @@ type DaemonWS struct {
 
 	// Callbacks wired up by the owning Daemon for server-initiated
 	// intent-change commands. Both are idempotent.
-	sleepFunc  func(aiAgentInstanceID string)
-	wakeFunc   func(aiAgentInstanceID string, spawnContext json.RawMessage)
-	cycleFunc  func(aiAgentInstanceID string, spawnContext json.RawMessage)
+	sleepFunc func(aiAgentInstanceID string)
+	wakeFunc  func(aiAgentInstanceID string, spawnContext json.RawMessage)
+	cycleFunc func(aiAgentInstanceID string, spawnContext json.RawMessage)
+
+	// scheduledTriggerFireFunc handles a server-pushed scheduled_trigger_fire
+	// (Routines): spawn a temp agent or wake an existing one, inject the
+	// kickoff, and ack. Wired to Daemon.handleScheduledTriggerFire.
+	scheduledTriggerFireFunc func(raw json.RawMessage)
+
+	// announceSatelliteFunc handles a server-pushed announce_satellite (voice V5b):
+	// the relay asks this host — the one holding the HA connection — to speak a
+	// message on a voice satellite on behalf of a (possibly parked) agent, by
+	// invoking the HA announce verb. Wired to Daemon.handleAnnounceSatellite.
+	announceSatelliteFunc func(aiAgentInstanceID, connection, entityID, message string)
 
 	// Identity-cache callbacks. Server pushes "account",
 	// "organizations_list", and "agent_home_path" on connect (and on
@@ -46,7 +57,7 @@ type DaemonWS struct {
 	// `hearth status` can read them out of process memory.
 	accountFunc       func(humanUserID, email string)
 	organizationsFunc func(orgs []daemonOrgEntry)
-	agentHomePathFunc  func(dir string)
+	agentHomePathFunc func(dir string)
 
 	// afterReconnectFunc, when set, runs after the post-reconnect
 	// agent re-registration. Lets the owning Daemon hook additional
@@ -95,8 +106,8 @@ type agentWS struct {
 	// could surface a different agent's transcript when multiple
 	// hearth or non-hearth sessions share a cwd or session-state dir.
 	agentSessionID string
-	injectFunc        func([]byte) error
-	killFunc          func()
+	injectFunc     func([]byte) error
+	killFunc       func()
 	// kickSubmitFunc, when set, is called immediately after writing the
 	// submit byte during text injection. Used for harnesses (gemini-cli)
 	// whose TextInput buffers pasted content past the submit byte and
@@ -315,6 +326,10 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		PluginUpgrade        bool   `json:"plugin_upgrade"`
 		PluginForce          bool   `json:"plugin_force"`
 		PluginAllowBreaking  bool   `json:"plugin_allow_breaking"`
+		// announce_satellite fields (voice V5b).
+		Connection string `json:"connection"`
+		EntityID   string `json:"entity_id"`
+		Message    string `json:"message"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
@@ -418,6 +433,14 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		// device. Read off the read loop — file IO can take a moment on
 		// long transcripts.
 		go d.replayTranscriptHistory(msg.AIAgentInstanceID, msg.Limit)
+	case "announce_satellite":
+		// Voice V5b — speak a message on a satellite via the HA announce verb, on
+		// behalf of the named agent. Off the read loop: it does a server authorize
+		// round-trip plus the HA call, and blocking here would stall every other
+		// frame.
+		if d.announceSatelliteFunc != nil {
+			go d.announceSatelliteFunc(msg.AIAgentInstanceID, msg.Connection, msg.EntityID, msg.Message)
+		}
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
 	}
@@ -500,6 +523,16 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		// floor without logging. Same trap that swallowed
 		// destroy_agent_instance; see the note on that switch.
 		d.routeControlFrame(data)
+		return true
+	case "scheduled_trigger_fire":
+		// Routines. Routed here (above the agent-id guard) because temp-mode
+		// fires carry NO ai_agent_instance_id — the daemon mints the instance.
+		// Existing-mode fires do carry one; both land here and the handler
+		// branches on target_mode. Runs in its own goroutine: it spawns/waits
+		// and blocks, which must not stall the WS read loop.
+		if d.scheduledTriggerFireFunc != nil {
+			go d.scheduledTriggerFireFunc(data)
+		}
 		return true
 	}
 
@@ -765,6 +798,63 @@ func (d *DaemonWS) routeChatMention(raw []byte, agentInstanceID string) bool {
 	return true
 }
 
+// lookupAgentWS returns the live per-instance handle, or nil if the instance
+// isn't registered on this daemon.
+func (d *DaemonWS) lookupAgentWS(id string) *agentWS {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.instances[id]
+}
+
+// waitForLiveInstance polls until the instance is registered with an inject
+// hook (i.e. a spawn has wired it up) or the timeout elapses. Used after a
+// wake/temp-spawn, where registration happens asynchronously.
+func (d *DaemonWS) waitForLiveInstance(id string, timeout time.Duration) *agentWS {
+	deadline := time.Now().Add(timeout)
+	for {
+		if aw := d.lookupAgentWS(id); aw != nil && aw.injectFunc != nil {
+			return aw
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// injectPseudoTurn injects a paste-wrapped prompt into a live agent and submits
+// it, mirroring the routeChatMention / routeAgentApprovalRequest path. Returns
+// false if the instance isn't live. For harnesses with an inject gate
+// (codex/gemini) injectFunc blocks until the child is ready; others write
+// immediately, so callers spawning a fresh agent must settle first.
+func (d *DaemonWS) injectPseudoTurn(id string, prompt []byte) bool {
+	aw := d.lookupAgentWS(id)
+	if aw == nil || aw.injectFunc == nil {
+		return false
+	}
+	payload := make([]byte, 0, len(prompt)+12)
+	payload = append(payload, []byte("\x1b[200~")...)
+	payload = append(payload, prompt...)
+	payload = append(payload, []byte("\x1b[201~")...)
+	if err := aw.injectFunc(payload); err != nil {
+		log.Printf("daemon-ws: pseudo-turn inject error for %s: %v", id, err)
+		return false
+	}
+	delay := 50 * time.Millisecond
+	if h, ok := getHarnessByServerName(aw.agent); ok {
+		delay = h.SubmitDelay()
+	}
+	time.Sleep(delay)
+	if err := aw.injectFunc([]byte{'\r'}); err != nil {
+		log.Printf("daemon-ws: pseudo-turn submit error for %s: %v", id, err)
+	}
+	if aw.kickSubmitFunc != nil {
+		time.Sleep(20 * time.Millisecond)
+		aw.kickSubmitFunc()
+	}
+	return true
+}
+
 func buildChatMentionPrompt(roomID, senderName, text string, contextLines []string) []byte {
 	// Wrap in a hearth/1 envelope so the phone's transcript renderer can
 	// suppress this injected context — it's agent scaffolding, not a real
@@ -868,6 +958,17 @@ func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMes
 	return d.SendWSRequestTimeout(correlationID, msgType, data, defaultWSRequestTimeout)
 }
 
+// SendWSRequestAs is SendWSRequest with an explicit caller principal, attached
+// to the frame as principal_kind/principal_id so the relay authorizes the
+// action against that principal. Used by the CLI-relay path (handleWSRequest),
+// which resolves the calling agent from the IPC caller's process tree
+// (derivePrincipal). Empty principalKind sends no principal fields — the relay
+// then defaults the caller to the host-owner human (daemon-self calls, and
+// human-operator CLI calls).
+func (d *DaemonWS) SendWSRequestAs(correlationID, msgType string, data json.RawMessage, principalKind, principalID string) ([]byte, error) {
+	return d.SendWSRequestTimeoutAs(correlationID, msgType, data, principalKind, principalID, defaultWSRequestTimeout)
+}
+
 // SendWSRequestTimeout is the per-call timeout variant. Used by the
 // resource-plugin Ask path (preflightAuthorizeResourceInvoke),
 // which blocks server-side on a human response and needs longer than
@@ -875,6 +976,13 @@ func (d *DaemonWS) SendWSRequest(correlationID, msgType string, data json.RawMes
 // something slightly longer here so the daemon-side deadline doesn't
 // fire before the server has a chance to return human_timeout itself.
 func (d *DaemonWS) SendWSRequestTimeout(correlationID, msgType string, data json.RawMessage, timeout time.Duration) ([]byte, error) {
+	return d.SendWSRequestTimeoutAs(correlationID, msgType, data, "", "", timeout)
+}
+
+// SendWSRequestTimeoutAs is SendWSRequestTimeout carrying an explicit caller
+// principal (see SendWSRequestAs). Empty principalKind omits the principal
+// fields entirely.
+func (d *DaemonWS) SendWSRequestTimeoutAs(correlationID, msgType string, data json.RawMessage, principalKind, principalID string, timeout time.Duration) ([]byte, error) {
 	msg := map[string]interface{}{
 		"type":           "ws_request",
 		"correlation_id": correlationID,
@@ -882,6 +990,10 @@ func (d *DaemonWS) SendWSRequestTimeout(correlationID, msgType string, data json
 	}
 	if len(data) > 0 {
 		msg["data"] = json.RawMessage(data)
+	}
+	if principalKind != "" {
+		msg["principal_kind"] = principalKind
+		msg["principal_id"] = principalID
 	}
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {

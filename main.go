@@ -66,8 +66,6 @@ func main() {
 		runOrganization(os.Args[2:])
 	case "wd":
 		runWD(os.Args[2:])
-	case "talk":
-		runTalk(os.Args[2:])
 	case "resource":
 		runResource(os.Args[2:])
 	case "run":
@@ -76,6 +74,8 @@ func main() {
 		runSecret(os.Args[2:])
 	case "chat":
 		runChat(os.Args[2:])
+	case "voice":
+		runVoice(os.Args[2:])
 	case "plugin":
 		runPlugin(os.Args[2:])
 	case "update":
@@ -114,10 +114,8 @@ Commands:
   status     Show daemon status on this host
   logout     Sign out on this machine (stops the host, revokes creds, clears config)
 
-  hh         Manage household entities (household, user, job_description, position, agent, ai_model, host, device, invite)
+  hh         Manage household entities (household, user, job_description, position, agent, ai_model, harness, host, device, invite)
   wd         Manage working directories (list, get, create, update, abandon, delete)
-
-  talk       Open a TUI to talk to your active agent instances
 
   resource   Invoke verbs on installed resource plugins (invoke)
   run        Run a command with IAM-gated secrets injected as env vars

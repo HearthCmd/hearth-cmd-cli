@@ -646,11 +646,13 @@ func normalizeCopilotToolArgs(toolName string, args map[string]interface{}) map[
 	return out
 }
 
-// envelopeTimestamp pulls the `ts` field out of a hearth/1 envelope at the
-// start of `text`. Returns "" for non-enveloped text or any parse failure —
-// callers treat absence as "no per-entry timestamp."
+// envelopeTimestamp pulls the `ts` field out of a hearth/1 or hearth/2 envelope
+// at the start of `text` (both prefixes are 9 chars and carry `ts` identically).
+// Returns "" for non-enveloped text or any parse failure — callers treat absence
+// as "no per-entry timestamp."
 func envelopeTimestamp(text string) string {
-	if !strings.HasPrefix(text, "hearth/1 ") {
+	const hdrLen = len("hearth/1 ") // == len("hearth/2 ")
+	if !strings.HasPrefix(text, "hearth/1 ") && !strings.HasPrefix(text, "hearth/2 ") {
 		return ""
 	}
 	nl := strings.Index(text, "\n")
@@ -660,7 +662,7 @@ func envelopeTimestamp(text string) string {
 	var hdr struct {
 		TS string `json:"ts"`
 	}
-	if err := json.Unmarshal([]byte(text[len("hearth/1 "):nl]), &hdr); err != nil {
+	if err := json.Unmarshal([]byte(text[hdrLen:nl]), &hdr); err != nil {
 		return ""
 	}
 	return hdr.TS
