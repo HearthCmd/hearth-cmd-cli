@@ -105,6 +105,13 @@ func OpenDaemonDB(home string) (*DaemonDB, error) {
 		db.Close()
 		return nil, fmt.Errorf("create resource_entities index: %w", err)
 	}
+	// agent_inbox: per-instance queue of turns waiting for a harness that
+	// isn't currently accepting them. See agent_inbox.go and
+	// docs/agent-inbox-spec.md.
+	if err := ensureAgentInboxSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	log.Printf("daemon: local sqlite ready (%s)", path)
 	return &DaemonDB{db: db}, nil
 }

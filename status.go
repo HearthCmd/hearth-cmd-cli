@@ -166,7 +166,42 @@ func printThisHostSection(out *os.File, ident *ipcResponse, instances []instance
 		fmt.Fprintf(tw, "    %s\t%s\t%s\t%s\n", shortID(s.AIAgentInstanceID), s.Agent, s.Project, s.Cwd)
 	}
 	tw.Flush()
+	printInboxWarnings(out, instances)
 	fmt.Fprintln(out)
+}
+
+// printInboxWarnings surfaces any agent whose message inbox isn't empty.
+// Silent in the normal case: a queue only has depth while an agent is busy,
+// which is measured in seconds. Anything that persists long enough for a human
+// to run `hearth status` and see it is worth naming, and a quarantined message
+// is a message that did not reach the agent — the one outcome the inbox exists
+// to make impossible to miss.
+func printInboxWarnings(out *os.File, instances []instanceInfo) {
+	for _, s := range instances {
+		if s.InboxPending == 0 && s.InboxQuarantined == 0 {
+			continue
+		}
+		switch {
+		case s.InboxQuarantined > 0:
+			fmt.Fprintf(out, "    ! %s: %s undelivered, %s waiting — `hearth hh agent inbox %s`\n",
+				shortID(s.AIAgentInstanceID),
+				countNoun(s.InboxQuarantined, "message"), countNoun(s.InboxPending, "message"),
+				s.AIAgentInstanceID)
+		default:
+			fmt.Fprintf(out, "    · %s: %s waiting for the agent to finish its turn\n",
+				shortID(s.AIAgentInstanceID), countNoun(s.InboxPending, "message"))
+		}
+	}
+}
+
+// countNoun renders "1 message" / "3 messages". (daemon.go has its own
+// plural() taking both forms explicitly; this one only ever pluralizes with
+// an -s, so it takes one word.)
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // printHarnessesSection shows which harness CLIs the daemon can resolve on

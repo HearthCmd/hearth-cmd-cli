@@ -31,10 +31,25 @@ func transcriptFrame(agent, dataLine string, retry bool) []byte {
 	return []byte(fmt.Sprintf(`{"type":"transcript","agent":%q,"data":%s}`, agent, dataLine))
 }
 
+// transcriptObserver is implemented by *agentWS. The bridge tail already reads
+// every line of the agent's transcript, which makes it the one place that sees
+// turn boundaries and knows what became of an injected payload — so the
+// readiness tracker and the inbox's confirmation oracle both feed from here.
+// Optional: the direct-WS and test paths don't implement it.
+type transcriptObserver interface {
+	ObserveTranscriptLine(line []byte)
+}
+
 // tailBridge tails the bridge file and sends each line over the WebSocket
 // as a JSON transcript message. Blocks until done is closed or an error occurs.
 // After done is closed, drains any remaining lines before returning.
 func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
+	observer, _ := ws.(transcriptObserver)
+	observe := func(line string) {
+		if observer != nil {
+			observer.ObserveTranscriptLine([]byte(line))
+		}
+	}
 	log.Printf("bridge: starting tail for %s (agent=%s)", path, agent)
 	// Wait for the bridge file to appear (hook creates it)
 	var f *os.File
@@ -74,11 +89,13 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 					fullLine := trimNewline(partial + line)
 					partial = ""
 					if fullLine != "" {
+						observe(fullLine)
 						ws.SendText(transcriptFrame(agent, fullLine, false))
 					}
 				} else {
 					// EOF or error — send any remaining buffered partial
 					if partial != "" {
+						observe(partial)
 						ws.SendText(transcriptFrame(agent, partial, false))
 					}
 					return
@@ -99,6 +116,7 @@ func tailBridge(path string, ws WSConn, done <-chan struct{}, agent string) {
 			fullLine := trimNewline(partial + line)
 			partial = ""
 			if fullLine != "" {
+				observe(fullLine)
 				frame := transcriptFrame(agent, fullLine, false)
 				ws.SendText(frame)
 				linesSent++

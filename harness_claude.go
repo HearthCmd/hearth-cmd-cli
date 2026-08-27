@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
@@ -33,6 +34,26 @@ func (claudeStream) TransformLine(line string) [][]byte {
 }
 
 func (claudeHarness) NewStreamTransformer() StreamTransformer { return claudeStream{} }
+
+// ObserveTranscript: base classifier plus claude's exact end-of-turn marker.
+//
+// Claude writes {"type":"system","subtype":"turn_duration"} ~30ms after the
+// final assistant entry of a turn. It is the tightest idle signal any harness
+// gives us, and it is what keeps the inbox's redelivery count at zero in the
+// common case rather than relying on the quiescence fallback.
+//
+// The swallow signal (attachment / queued_command) is claude's too, but it is
+// handled in the base classifier because bridge output is claude-shape for
+// everyone — if another harness ever emits the same entry, it means the same
+// thing.
+func (claudeHarness) ObserveTranscript(line []byte) TranscriptObservation {
+	obs := baseObserveTranscript(line)
+	var e bridgeEntry
+	if json.Unmarshal(line, &e) == nil && e.Type == "system" && e.Subtype == "turn_duration" {
+		obs.TurnEnd = true
+	}
+	return obs
+}
 
 func (claudeHarness) Name() string         { return "claude" }
 func (claudeHarness) Binary() string       { return "claude" }

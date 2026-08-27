@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -36,6 +37,12 @@ type DaemonWS struct {
 
 	// Callbacks wired up by the owning Daemon for server-initiated
 	// intent-change commands. Both are idempotent.
+	// inboxResolvedFunc, when set, is called as each queued turn leaves an
+	// instance's inbox, whatever the outcome. Wired by the owning Daemon so
+	// producers that must report a delivery result (scheduled Routines) can,
+	// long after their own call returned. See docs/agent-inbox-spec.md.
+	inboxResolvedFunc func(e *inboxEntry, outcome string)
+
 	sleepFunc func(aiAgentInstanceID string)
 	wakeFunc  func(aiAgentInstanceID string, spawnContext json.RawMessage)
 	cycleFunc func(aiAgentInstanceID string, spawnContext json.RawMessage)
@@ -114,6 +121,16 @@ type agentWS struct {
 	// only flushes when an external event (e.g. SIGWINCH from a winsize
 	// change) re-enters their main loop.
 	kickSubmitFunc func()
+
+	// readiness/inbox/deliverer are the delivery substrate: every turn
+	// injected into this agent is queued and drained on an availability
+	// edge rather than written straight to the PTY. Wired by
+	// StartInboxDelivery once the harness name is known. nil when the
+	// daemon's local DB is unavailable, in which case injection falls back
+	// to the direct write (see deliverTurn). See docs/agent-inbox-spec.md.
+	readiness *agentReadiness
+	inbox     *agentInbox
+	deliverer *inboxDeliverer
 }
 
 // NewDaemonWS creates a multiplexed WebSocket connection.
@@ -209,8 +226,14 @@ func (d *DaemonWS) SetAgentSessionID(id, sessionID string) {
 // UnregisterAgentInstance removes an agent instance handle.
 func (d *DaemonWS) UnregisterAgentInstance(id string) {
 	d.mu.Lock()
+	aw := d.instances[id]
 	delete(d.instances, id)
 	d.mu.Unlock()
+	if aw != nil {
+		// Stop draining, but leave the queue on disk: anything still
+		// pending is delivered when this instance next spawns.
+		aw.StopInboxDelivery()
+	}
 	log.Printf("daemon-ws: unregistered agent instance %s", id)
 }
 
@@ -347,8 +370,18 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 	case "retire_agent_instance":
 		// Drop any local state for this instance — the server has retired the row.
 		d.mu.Lock()
+		aw := d.instances[msg.AIAgentInstanceID]
 		delete(d.instances, msg.AIAgentInstanceID)
 		d.mu.Unlock()
+		if aw != nil {
+			aw.StopInboxDelivery()
+			// A retired agent's queue will never drain, and keeping it
+			// would mean a future same-id instance replaying dead
+			// messages. This is the one place we discard on purpose.
+			if err := aw.inbox.DropInstance(); err != nil {
+				log.Printf("WARN daemon-ws: could not clear inbox for retired %s: %v", msg.AIAgentInstanceID, err)
+			}
+		}
 		log.Printf("daemon-ws: retired agent instance %s", msg.AIAgentInstanceID)
 	case "install_plugin":
 		// App-initiated install. The server has already authorized the
@@ -375,6 +408,12 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		aw := d.instances[msg.AIAgentInstanceID]
 		delete(d.instances, msg.AIAgentInstanceID)
 		d.mu.Unlock()
+		if aw != nil {
+			aw.StopInboxDelivery()
+			if err := aw.inbox.DropInstance(); err != nil {
+				log.Printf("WARN daemon-ws: could not clear inbox for destroyed %s: %v", msg.AIAgentInstanceID, err)
+			}
+		}
 		if aw != nil && aw.killFunc != nil {
 			aw.killFunc()
 		}
@@ -614,50 +653,51 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		}
 	}
 
-	// Wrap the body in bracketed-paste markers so TUI agents that auto-
-	// submit on every internal \n (codex, pi — both ratatui-based) treat
-	// the whole envelope as a single paste into the input field. claude-
-	// code's Ink-based TUI also honors bracketed paste, so the wrapping
-	// is uniform across harnesses. After the end marker, a single \r
-	// submits the input as one prompt — and the system-prompt instruction
-	// to extract "the body after the blank line" finally applies because
-	// the agent sees the whole hearth/1 envelope as one user turn instead
-	// of the JSON header and body arriving as separate, partial submits.
+	// Hand the body to the inbox, which wraps it in bracketed paste and
+	// submits it when the harness is actually accepting turns. The wrapping
+	// matters because TUI agents that auto-submit on every internal \n
+	// (codex, pi — both ratatui-based) would otherwise see the JSON header
+	// and the body arrive as two partial submits; the timing matters because
+	// a write into a mid-turn harness is silently absorbed rather than
+	// becoming a turn (docs/agent-inbox-spec.md §1).
 	text := bytes.TrimRight(decoded, "\r\n")
-	needsSubmit := len(text) > 0 || len(decoded) > 0
-
-	if len(text) > 0 {
-		log.Printf("daemon-ws: inject %d bytes to %s", len(text), msg.AIAgentInstanceID)
-		payload := make([]byte, 0, len(text)+12)
-		payload = append(payload, []byte("\x1b[200~")...)
-		payload = append(payload, text...)
-		payload = append(payload, []byte("\x1b[201~")...)
-		if err := aw.injectFunc(payload); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.AIAgentInstanceID, err)
-		}
+	if len(text) == 0 {
+		return true
 	}
 
-	if needsSubmit {
-		// Per-harness pause between paste payload and the \r submit
-		// byte. Most are happy with ~50ms; gemini-cli's TextInput needs
-		// ~300ms to settle and is paired with a SIGWINCH kick after \r
-		// (see kickSubmitFunc / Harness.PostSubmit). Un-ported harnesses
-		// fall through to the 50ms default. See harness_iface.go.
-		delay := 50 * time.Millisecond
-		if h, ok := getHarnessByServerName(aw.agent); ok {
-			delay = h.SubmitDelay()
-		}
-		time.Sleep(delay)
-		if err := aw.injectFunc([]byte{'\r'}); err != nil {
-			log.Printf("daemon-ws: inject error for %s: %v", msg.AIAgentInstanceID, err)
-		}
-		if aw.kickSubmitFunc != nil {
-			time.Sleep(20 * time.Millisecond)
-			aw.kickSubmitFunc()
-		}
+	// System events (permission_resolved and friends) are observability, and
+	// a stale one is noise — give them a much shorter shelf life than a
+	// person's message.
+	source, ttl := "relay_input", inboxTTLChat
+	if isSystemEventEnvelope(text) {
+		source, ttl = "system_event", inboxTTLSystemEvent
 	}
-
+	d.deliverTurn(msg.AIAgentInstanceID, text, source, ttl)
 	return true
+}
+
+// isSystemEventEnvelope reports whether a payload is a server-emitted
+// system_event envelope rather than something a person or a Routine sent.
+func isSystemEventEnvelope(payload []byte) bool {
+	s := string(payload)
+	if !strings.HasPrefix(s, "hearth/") {
+		return false
+	}
+	line, _, found := strings.Cut(s, "\n")
+	if !found {
+		return false
+	}
+	_, header, found := strings.Cut(line, " ")
+	if !found {
+		return false
+	}
+	var env struct {
+		Kind string `json:"kind"`
+	}
+	if json.Unmarshal([]byte(header), &env) != nil {
+		return false
+	}
+	return env.Kind == "system_event"
 }
 
 // routeAgentApprovalRequest handles an inbound agent_approval_request
@@ -710,27 +750,7 @@ func (d *DaemonWS) routeAgentApprovalRequest(raw []byte, agentInstanceID string)
 	prompt := buildApprovalPrompt(frame.RequestID, frame.InitiatorID, frame.InitiatorKind,
 		frame.ResourceKind, frame.ResourceID, frame.Action, frame.SubjectKind, frame.Subject)
 
-	log.Printf("daemon-ws: agent_approval_request inject %d bytes to %s (request_id=%s)", len(prompt), agentInstanceID, frame.RequestID)
-	payload := make([]byte, 0, len(prompt)+12)
-	payload = append(payload, []byte("\x1b[200~")...)
-	payload = append(payload, prompt...)
-	payload = append(payload, []byte("\x1b[201~")...)
-	if err := aw.injectFunc(payload); err != nil {
-		log.Printf("daemon-ws: agent_approval_request inject error for %s: %v", agentInstanceID, err)
-		return true
-	}
-	delay := 50 * time.Millisecond
-	if h, ok := getHarnessByServerName(aw.agent); ok {
-		delay = h.SubmitDelay()
-	}
-	time.Sleep(delay)
-	if err := aw.injectFunc([]byte{'\r'}); err != nil {
-		log.Printf("daemon-ws: agent_approval_request submit error for %s: %v", agentInstanceID, err)
-	}
-	if aw.kickSubmitFunc != nil {
-		time.Sleep(20 * time.Millisecond)
-		aw.kickSubmitFunc()
-	}
+	d.deliverTurn(agentInstanceID, prompt, "agent_approval_request", inboxTTLApproval)
 	return true
 }
 
@@ -774,27 +794,7 @@ func (d *DaemonWS) routeChatMention(raw []byte, agentInstanceID string) bool {
 		return lines
 	}())
 
-	log.Printf("daemon-ws: chat_mention inject %d bytes to %s (room=%s)", len(prompt), agentInstanceID, frame.RoomID)
-	payload := make([]byte, 0, len(prompt)+12)
-	payload = append(payload, []byte("\x1b[200~")...)
-	payload = append(payload, prompt...)
-	payload = append(payload, []byte("\x1b[201~")...)
-	if err := aw.injectFunc(payload); err != nil {
-		log.Printf("daemon-ws: chat_mention inject error for %s: %v", agentInstanceID, err)
-		return true
-	}
-	delay := 50 * time.Millisecond
-	if h, ok := getHarnessByServerName(aw.agent); ok {
-		delay = h.SubmitDelay()
-	}
-	time.Sleep(delay)
-	if err := aw.injectFunc([]byte{'\r'}); err != nil {
-		log.Printf("daemon-ws: chat_mention submit error for %s: %v", agentInstanceID, err)
-	}
-	if aw.kickSubmitFunc != nil {
-		time.Sleep(20 * time.Millisecond)
-		aw.kickSubmitFunc()
-	}
+	d.deliverTurn(agentInstanceID, prompt, "chat_mention", inboxTTLChat)
 	return true
 }
 
@@ -822,38 +822,80 @@ func (d *DaemonWS) waitForLiveInstance(id string, timeout time.Duration) *agentW
 	}
 }
 
-// injectPseudoTurn injects a paste-wrapped prompt into a live agent and submits
-// it, mirroring the routeChatMention / routeAgentApprovalRequest path. Returns
-// false if the instance isn't live. For harnesses with an inject gate
-// (codex/gemini) injectFunc blocks until the child is ready; others write
-// immediately, so callers spawning a fresh agent must settle first.
-func (d *DaemonWS) injectPseudoTurn(id string, prompt []byte) bool {
-	aw := d.lookupAgentWS(id)
-	if aw == nil || aw.injectFunc == nil {
-		return false
-	}
+// writeTurnToPTY writes one paste-wrapped prompt to the agent's PTY and submits
+// it. This is the raw mechanism, with no readiness check and no confirmation —
+// which is precisely why nothing outside the inbox's delivery loop should call
+// it. A bare write here is what silently loses messages when the harness is
+// mid-turn (docs/agent-inbox-spec.md §1).
+//
+// For harnesses with an inject gate (codex/gemini) injectFunc blocks until the
+// child is ready; others write immediately.
+func writeTurnToPTY(aw *agentWS, prompt []byte) error {
 	payload := make([]byte, 0, len(prompt)+12)
 	payload = append(payload, []byte("\x1b[200~")...)
 	payload = append(payload, prompt...)
 	payload = append(payload, []byte("\x1b[201~")...)
 	if err := aw.injectFunc(payload); err != nil {
-		log.Printf("daemon-ws: pseudo-turn inject error for %s: %v", id, err)
-		return false
+		return err
 	}
+
+	// Per-harness pause between paste payload and the \r submit byte. Most
+	// are happy with ~50ms; gemini-cli's TextInput needs ~300ms to settle
+	// and is paired with a SIGWINCH kick after \r (see kickSubmitFunc /
+	// Harness.PostSubmit). Un-ported harnesses fall through to the 50ms
+	// default. See harness_iface.go.
 	delay := 50 * time.Millisecond
 	if h, ok := getHarnessByServerName(aw.agent); ok {
 		delay = h.SubmitDelay()
 	}
 	time.Sleep(delay)
 	if err := aw.injectFunc([]byte{'\r'}); err != nil {
-		log.Printf("daemon-ws: pseudo-turn submit error for %s: %v", id, err)
+		return err
 	}
 	if aw.kickSubmitFunc != nil {
 		time.Sleep(20 * time.Millisecond)
 		aw.kickSubmitFunc()
 	}
+	return nil
+}
+
+// deliverTurn is the single entry point for putting a turn into an agent's
+// context. Every producer goes through it — phone chat, @mentions,
+// agent-as-approver pages, system events, scheduled Routine kickoffs — so there
+// is no second path that can quietly regress to an unconditional write.
+//
+// It queues rather than writes: the inbox's drain loop picks the moment, and
+// confirms against the transcript that the payload actually became a turn.
+// Returns false only when the instance isn't live on this daemon, which is the
+// caller's cue to fall back to its existing "no live agent" handling. The inbox
+// covers "agent present but unavailable" and deliberately not "host offline" —
+// that boundary stays with the relay (docs/agent-inbox-spec.md §6).
+func (d *DaemonWS) deliverTurn(id string, prompt []byte, source string, ttl time.Duration) bool {
+	aw := d.lookupAgentWS(id)
+	if aw == nil || aw.injectFunc == nil {
+		return false
+	}
+
+	if aw.inbox == nil {
+		// No local DB — the daemon logged that loudly at boot. Degrade to
+		// the pre-inbox behavior rather than dropping the message entirely.
+		log.Printf("WARN daemon-ws: no inbox for %s; writing %s turn straight to the PTY (may be swallowed if the agent is mid-turn)", id, source)
+		if err := writeTurnToPTY(aw, prompt); err != nil {
+			log.Printf("daemon-ws: %s inject error for %s: %v", source, id, err)
+			return false
+		}
+		return true
+	}
+
+	key, probe := inboxKeyAndProbe(prompt)
+	if err := aw.inbox.Enqueue(key, prompt, probe, source, ttl); err != nil {
+		log.Printf("WARN daemon-ws: could not queue %s turn for %s: %v", source, id, err)
+		return false
+	}
+	log.Printf("daemon-ws: queued %d-byte %s turn for %s (key=%s)", len(prompt), source, id, key)
 	return true
 }
+
 
 func buildChatMentionPrompt(roomID, senderName, text string, contextLines []string) []byte {
 	// Wrap in a hearth/1 envelope so the phone's transcript renderer can
@@ -936,13 +978,72 @@ func (aw *agentWS) SendText(data []byte) {
 }
 
 // RegisterPending creates a channel for receiving a permission response.
+//
+// It also marks the agent busy for readiness purposes: an interpose permission
+// request in flight means the harness is blocked waiting on a human, which is
+// both unambiguously "not accepting turns" and — before the inbox existed — the
+// single most common moment for an injected message to be silently swallowed.
 func (aw *agentWS) RegisterPending(requestID string) <-chan []byte {
+	if aw.readiness != nil {
+		aw.readiness.AskStarted(requestID)
+	}
 	return aw.daemon.ws.RegisterPending(requestID)
 }
 
-// RemovePending removes a pending request channel.
+// RemovePending removes a pending request channel. Idempotent, and so is the
+// readiness side (it tracks a set of request ids, not a count).
 func (aw *agentWS) RemovePending(requestID string) {
+	if aw.readiness != nil {
+		aw.readiness.AskEnded(requestID)
+	}
 	aw.daemon.ws.RemovePending(requestID)
+}
+
+// StartInboxDelivery stands up this instance's readiness tracker, queue, and
+// drain loop. Called from the spawn path once aw.agent is known (the harness
+// name selects the transcript classifier). Safe to call with a nil db — the
+// instance then falls back to direct PTY writes, loudly.
+func (aw *agentWS) StartInboxDelivery(db *DaemonDB) {
+	aw.readiness = newAgentReadiness(aw.aiAgentInstanceID, aw.agent)
+	if db == nil || db.db == nil {
+		log.Printf("WARN daemon-ws: no local DB — agent %s has no message inbox; turns injected while it is busy may be lost", aw.aiAgentInstanceID)
+		return
+	}
+	aw.inbox = newAgentInbox(db, aw.aiAgentInstanceID)
+	aw.deliverer = newInboxDeliverer(aw.aiAgentInstanceID, aw.inbox, aw.readiness, func(payload []byte) error {
+		return writeTurnToPTY(aw, payload)
+	})
+	// Read the hook at call time, not now: the daemon wires it at boot, and
+	// binding it here would make the ordering of two unrelated setup steps
+	// load-bearing.
+	aw.deliverer.onResolved = func(e *inboxEntry, outcome string) {
+		if f := aw.daemon.inboxResolvedFunc; f != nil {
+			f(e, outcome)
+		}
+	}
+	go aw.deliverer.run()
+
+	if depth, err := aw.inbox.Depth(); err == nil && depth > 0 {
+		// Messages queued before a daemon restart or an agent sleep. This
+		// surviving is the entire point of persisting the queue.
+		log.Printf("daemon-ws: agent %s has %d message(s) waiting from a previous session", aw.aiAgentInstanceID, depth)
+	}
+}
+
+// StopInboxDelivery ends the drain loop. The queue itself persists — an agent
+// that stops mid-queue drains on its next spawn.
+func (aw *agentWS) StopInboxDelivery() {
+	if aw.deliverer != nil {
+		aw.deliverer.Stop()
+	}
+}
+
+// ObserveTranscriptLine feeds one bridge-shape line to the readiness tracker.
+// Called from the bridge tail, which reads every line anyway.
+func (aw *agentWS) ObserveTranscriptLine(line []byte) {
+	if aw.readiness != nil {
+		aw.readiness.ObserveLine(line)
+	}
 }
 
 // defaultWSRequestTimeout caps a server round-trip the daemon waits on

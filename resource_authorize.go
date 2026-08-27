@@ -217,6 +217,60 @@ func (d *Daemon) preflightAuthorizeResourceInvoke(ws authzWS, principalKind, pri
 	}
 }
 
+// fetchConnectionCredentials asks the server for a connection's bound
+// {credential_name: secret_id} autofill map, so the entity-snapshot refresh
+// path (`hearth resource refresh <conn>`) can populate the snapshot without the
+// caller passing --secret — the connection-scoped analogue of the autofill the
+// invoke authorize hands back. It authorizes no verb: the server gates on a fact
+// (principal ownership + org membership), never a human ask, because a snapshot
+// is read-only metadata the daemon caches for its own evaluator.
+//
+// Returns nil (no error) when the connection is unbound or the server predates
+// this endpoint — the caller then falls back to its own --secret bindings. A
+// *PluginError is returned only on a real transport / authorization failure.
+func (d *Daemon) fetchConnectionCredentials(ws authzWS, principalKind, principalID, connID string) (map[string]string, *PluginError) {
+	if ws == nil || !ws.IsConnected() {
+		return nil, &PluginError{
+			Code:    ErrUnavailable,
+			Message: "daemon is offline from server; credential autofill is unavailable",
+		}
+	}
+	if principalID == "" {
+		return nil, &PluginError{Code: ErrUnauthorized, Message: "no authenticated principal; run `hearth login` first"}
+	}
+	if principalKind == "" {
+		principalKind = "human"
+	}
+	payload, err := json.Marshal(map[string]string{
+		"connection_id":  connID,
+		"principal_kind": principalKind,
+		"principal_id":   principalID,
+	})
+	if err != nil {
+		return nil, &PluginError{Code: ErrInternal, Message: "marshal credentials request: " + err.Error()}
+	}
+	raw, err := ws.SendWSRequest(generateUUID(), "resource_connection_credentials", payload)
+	if err != nil {
+		return nil, &PluginError{Code: ErrUnavailable, Message: "credentials ws_request: " + err.Error()}
+	}
+	var resp struct {
+		Type        string            `json:"type"`
+		Credentials map[string]string `json:"credentials"`
+		Error       string            `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, &PluginError{Code: ErrInternal, Message: "decode credentials response: " + err.Error()}
+	}
+	if resp.Type == "error" {
+		// A server that predates this endpoint answers with an "unknown
+		// msg_type" error; treat any error as "no autofill available" softly so
+		// refresh still works with an explicit --secret. Real auth failures
+		// (deny) surface later when the snapshot runs without credentials.
+		return nil, nil
+	}
+	return resp.Credentials, nil
+}
+
 // resolveEntityForAuthorize looks args.entity_id up in the daemon-local
 // resource_entities cache and returns its {kind, labels, parent} so
 // the server-side IAM evaluator can match predicate rules against it.

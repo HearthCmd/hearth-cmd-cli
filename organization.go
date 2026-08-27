@@ -956,7 +956,7 @@ func runOrganizationPos(args []string) {
 
 func runOrganizationAgent(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: hearth hh agent <list|get|create|sleep|wake|retire|attach>\n")
+		fmt.Fprintf(os.Stderr, "Usage: hearth hh agent <list|get|create|sleep|wake|retire|attach|inbox>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -1157,6 +1157,8 @@ func runOrganizationAgent(args []string) {
 		fmt.Fprintf(os.Stderr, "Removed %s\n", wdPath)
 	case "attach":
 		runAgentAttach(args[1:])
+	case "inbox":
+		runAgentInbox(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "hearth hh agent: unknown command %q\n", args[0])
 		os.Exit(1)

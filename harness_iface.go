@@ -237,6 +237,35 @@ type Harness interface {
 	//
 	// Errors are logged by the caller, never fatal.
 	RemoveSkill(ctx HarnessCtx, connectionID, pluginSlug string) error
+
+	// ObserveTranscript classifies one bridge-shape transcript line for the
+	// daemon's readiness tracker and the inbox's confirmation oracle: did a
+	// turn start, did one end, did an injected payload become a real turn,
+	// or did the harness absorb it into the running turn instead.
+	//
+	// Bridge output is claude-shape for every harness (that's the
+	// StreamTransformer contract), so baseObserveTranscript in
+	// agent_readiness.go covers the common cases and most harnesses delegate
+	// to it verbatim. Claude adds its own exact end-of-turn marker.
+	//
+	// Must be cheap and allocation-light: it runs on every transcript line.
+	ObserveTranscript(line []byte) TranscriptObservation
+}
+
+// TranscriptObservation is what one transcript line tells us about delivery.
+// Fields are independent — a single line can both end a turn and confirm a
+// landing. Empty strings mean "this line said nothing about that".
+//
+// Landed vs Swallowed is the distinction the whole inbox turns on:
+// Landed means the text became a real user turn the agent acts on; Swallowed
+// means the harness accepted the bytes and filed them against the in-flight
+// turn, where they neither render nor prompt a response. See
+// docs/agent-inbox-spec.md §1.
+type TranscriptObservation struct {
+	TurnStart bool
+	TurnEnd   bool
+	Landed    string
+	Swallowed string
 }
 
 // StreamTransformer converts on-disk transcript JSONL lines into

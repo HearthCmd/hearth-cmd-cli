@@ -223,6 +223,14 @@ type instanceInfo struct {
 	Project           string `json:"project"`
 	Cwd               string `json:"cwd"`
 	StartedAt         string `json:"started_at"`
+
+	// Message-inbox depth for this instance. Pending is turns waiting for
+	// the agent to be ready; Quarantined is turns the daemon gave up
+	// delivering and is holding for a human to look at. Both are almost
+	// always zero — `hearth status` prints them only when they aren't, so a
+	// healthy host reads exactly as it did before the inbox existed.
+	InboxPending     int `json:"inbox_pending,omitempty"`
+	InboxQuarantined int `json:"inbox_quarantined,omitempty"`
 }
 
 // Daemon manages the lifecycle of agent instances and the IPC socket.
@@ -862,6 +870,16 @@ func (d *Daemon) Run() {
 // pid_status update and leave the server believing those agents are still
 // running, pending a later host_disconnected reconciliation.
 func (d *Daemon) Shutdown() {
+	// Hard cap the whole drain so it can never cross systemd's stop timeout (default
+	// 90s → SIGKILL). On a normal shutdown the process exits well before this fires and
+	// the goroutine dies with it; it only trips if a step below hangs (e.g. a dead WS).
+	// desired_status is written first, so even a forced exit leaves the right state.
+	go func() {
+		time.Sleep(shutdownHardCap)
+		log.Printf("daemon: graceful shutdown exceeded %s — forcing exit", shutdownHardCap)
+		os.Exit(0)
+	}()
+
 	d.setHostDesiredStatus("disconnected")
 
 	// Snapshot the current instance map so we don't hold the lock while
@@ -876,10 +894,20 @@ func (d *Daemon) Shutdown() {
 	}
 	d.mu.RUnlock()
 
+	// Stop every agent CONCURRENTLY: each Stop() can block up to agentStopGrace when a
+	// child ignores SIGTERM, so doing them in series made total shutdown grow with the
+	// agent count (N × 10s) — enough, with several agents, to cross systemd's 90s. In
+	// parallel the whole wind-down is ~one grace window regardless of N.
+	var stopWg sync.WaitGroup
 	for _, s := range snapshot {
-		log.Printf("daemon: stopping agent instance %s", s.aiAgentInstanceID)
-		s.Stop()
+		stopWg.Add(1)
+		go func(inst *AgentInstance) {
+			defer stopWg.Done()
+			log.Printf("daemon: stopping agent instance %s", inst.aiAgentInstanceID)
+			inst.Stop()
+		}(s)
 	}
+	stopWg.Wait()
 
 	// Tear down plugin subprocesses. Ordered after instance Stop so a
 	// hypothetical future agent-side audit hook can still observe its
@@ -889,9 +917,17 @@ func (d *Daemon) Shutdown() {
 		log.Printf("daemon: plugin shutdown: %v", err)
 	}
 
-	// Let the monitoring goroutines flush their pid_status reports over
-	// the still-open WS before we close it.
-	d.agentWg.Wait()
+	// Let the monitoring goroutines flush their final pid_status over the still-open WS
+	// before we close it — but don't let a dying / reconnecting socket stall shutdown.
+	// Past agentReportFlushTimeout we close the WS anyway; the server reconciles the
+	// unreported agents via host_disconnected.
+	flushed := make(chan struct{})
+	go func() { d.agentWg.Wait(); close(flushed) }()
+	select {
+	case <-flushed:
+	case <-time.After(agentReportFlushTimeout):
+		log.Printf("daemon: pid_status flush timed out after %s; closing WS anyway", agentReportFlushTimeout)
+	}
 
 	if d.daemonWS != nil {
 		d.daemonWS.Close()
@@ -1088,6 +1124,7 @@ func (d *Daemon) startDaemonWS() {
 	d.daemonWS.wakeFunc = d.handleWakeAgentInstance
 	d.daemonWS.cycleFunc = d.handleCycleAgentInstance
 	d.daemonWS.scheduledTriggerFireFunc = d.handleScheduledTriggerFire
+	d.daemonWS.inboxResolvedFunc = d.handleInboxResolved
 	d.daemonWS.announceSatelliteFunc = d.handleAnnounceSatellite
 	d.daemonWS.accountFunc = d.SetAccount
 	d.daemonWS.organizationsFunc = d.SetOrganizations
@@ -1603,7 +1640,7 @@ func (d *Daemon) handleResourceInvoke(conn net.Conn, req ipcRequest) {
 			d.autoRefreshEntitiesOnFirstInvoke(ctx, rc, manifest, secretCleartexts)
 		} else if found, lastFetched, lerr := d.localDB.LatestEntityFetchedAt(rc.ConnectionID); lerr == nil && found {
 			if age := time.Since(lastFetched); age > snapshotStaleAfter {
-				log.Printf("daemon: entity snapshot for %s is stale (last refreshed %s ago); run `hearth resource refresh %s --secret ...`",
+				log.Printf("daemon: entity snapshot for %s is stale (last refreshed %s ago); run `hearth resource refresh %s`",
 					rc.Slug, age.Round(time.Hour), rc.Slug)
 			}
 		}
@@ -1847,7 +1884,18 @@ func (d *Daemon) handleResourceRefresh(conn net.Conn, req ipcRequest) {
 		})
 		return
 	}
-	secretCleartexts, secretErr := d.resolveSecretBindings(req.SecretBindings, principalKind, principalID)
+	// Autofill the connection's bound credential the same way an invoke does, so a
+	// refresh of an autofilled connection doesn't demand `--secret`. Best-effort:
+	// if the server can't hand it back (offline, or a build predating the endpoint)
+	// we fall through to whatever explicit --secret the caller passed — the snapshot
+	// then fails with a clear missing-credential error rather than here. autofill is
+	// merged UNDER explicit --secret (explicit wins on a name collision).
+	autofillCreds, credErr := d.fetchConnectionCredentials(d.resourceAuthzWS, principalKind, principalID, rc.ConnectionID)
+	if credErr != nil {
+		log.Printf("daemon: resource_refresh %s: credential autofill unavailable: %s", rc.Slug, credErr.Message)
+	}
+	bindings := mergeSecretBindings(autofillCreds, req.SecretBindings)
+	secretCleartexts, secretErr := d.resolveSecretBindings(bindings, principalKind, principalID)
 	if secretErr != nil {
 		sendControl(conn, ipcResponse{
 			Type:            "error",
@@ -2113,12 +2161,15 @@ func (d *Daemon) handleStatus(conn net.Conn) {
 	d.mu.RLock()
 	var instances []instanceInfo
 	for _, s := range d.instances {
+		pending, quarantined := CountAgentInbox(d.localDB, s.aiAgentInstanceID)
 		instances = append(instances, instanceInfo{
 			AIAgentInstanceID: s.aiAgentInstanceID,
 			Agent:             s.agent,
 			Project:           s.project,
 			Cwd:               s.cwd,
 			StartedAt:         s.startedAt.Format(time.RFC3339),
+			InboxPending:      pending,
+			InboxQuarantined:  quarantined,
 		})
 	}
 	d.mu.RUnlock()

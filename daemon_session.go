@@ -21,6 +21,17 @@ import (
 // to finish a turn).
 const agentStopGrace = 10 * time.Second
 
+// shutdownHardCap bounds a whole graceful shutdown so it can never outlast systemd's
+// stop timeout (default 90s → SIGKILL, which skips the desired_status write and reads
+// as a crash). If the drain hasn't finished by then, force a clean exit instead.
+const shutdownHardCap = 60 * time.Second
+
+// agentReportFlushTimeout bounds how long shutdown waits for the per-agent monitoring
+// goroutines to flush their final pid_status over the WS. A dying / reconnecting socket
+// must not stall shutdown — past this we close the WS anyway (the server reconciles the
+// rest via host_disconnected).
+const agentReportFlushTimeout = 15 * time.Second
+
 // AgentInstance represents a single running agent owned by the daemon.
 // Each AgentInstance corresponds exactly to one ai_agent_instance_id (one
 // conversation) on the server. All instances are detached: the PTY runs
@@ -318,6 +329,10 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 				}
 			}
 		}
+		// Stand up the message inbox before the bridge tail starts, so the
+		// readiness tracker sees the very first transcript line. Must come
+		// after aw.agent is set — the harness name picks the classifier.
+		aw.StartInboxDelivery(d.localDB)
 		r.wsConn = aw
 
 		// Start bridge tailer using the instance's WS handle

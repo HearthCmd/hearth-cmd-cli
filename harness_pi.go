@@ -108,3 +108,10 @@ func init() {
 	registerHarness(piHarness{})
 	registerVersionProbe("pi", probePiVersion)
 }
+
+// ObserveTranscript: no harness-specific turn markers known — the shared
+// claude-shape classifier plus the quiescence fallback in agent_readiness.go
+// carry this harness. Port an exact end-of-turn marker here if one turns up.
+func (piHarness) ObserveTranscript(line []byte) TranscriptObservation {
+	return baseObserveTranscript(line)
+}
