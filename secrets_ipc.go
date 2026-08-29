@@ -25,10 +25,18 @@ func (d *Daemon) handleSecretList(conn net.Conn, req ipcRequest) {
 		sendControl(conn, ipcResponse{Type: "error", Message: "daemon offline from server"})
 		return
 	}
+	// Attribute to the caller (CP1 discovery gate, docs/capability-provisioning.md
+	// §6): an agent subprocess resolves to its agent principal and is gated behind
+	// a discovery grant; a human operator resolves to the host owner and passes.
+	principalKind, principalID, identityErr := d.derivePrincipal(conn, "", "", "secret_list")
+	if identityErr != nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: identityErr.Message})
+		return
+	}
 	// Always list this host's secrets — the operator is at THIS host's
 	// CLI. Cross-host listing is a webview/mobile concern.
 	payload, _ := json.Marshal(map[string]string{"host_id": d.hostID})
-	raw, err := d.daemonWS.SendWSRequest(generateUUID(), "secrets_list", payload)
+	raw, err := d.daemonWS.SendWSRequestAs(generateUUID(), "secrets_list", payload, principalKind, principalID)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: "ws_request: " + err.Error()})
 		return

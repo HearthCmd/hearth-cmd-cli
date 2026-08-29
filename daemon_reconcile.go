@@ -47,6 +47,10 @@ type wakeTargetPayload struct {
 		// legacy NULL peg), in which case the daemon uses its compiled-in
 		// fallback. See the system_prompts catalog + spawn_context.
 		SystemPrompt string `json:"system_prompt"`
+		// Displays is a JSON array of the household screens this agent may publish
+		// to ([{id,name}]), server-computed (CP4). Empty when the household has no
+		// screens or the agent lacks display.publish. buildDisplayPrompt renders it.
+		Displays string `json:"displays"`
 	} `json:"spawn_context"`
 }
 
@@ -207,6 +211,7 @@ func (d *Daemon) wakeOneAgent(t wakeTargetPayload) {
 		t.SpawnContext.OrganizationName,
 		t.SpawnContext.LastSessionID,
 		t.SpawnContext.SystemPrompt,
+		t.SpawnContext.Displays,
 	); err != nil {
 		log.Printf("daemon: wake %s: spawn failed: %v", id, err)
 		d.reportPIDStatus(id, "spawn_failed")

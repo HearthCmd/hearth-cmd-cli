@@ -153,6 +153,17 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 		}
 	}
 	resourcePrompt := buildResourcePluginPrompt(req.AIAgentInstanceID, d.agentGrants, d.resourceConnections, d.plugins, entitiesByConn)
+	// Append the household-display competence section (CP4). Server-computed screen
+	// list rides in spawn_context; the durable "push=skill" competence for displays
+	// is this spawn-time prompt block (displays aren't plugins, so there's no
+	// connection skill file). Shares the resourcePluginPrompt composition slot.
+	if dp := buildDisplayPrompt(req.Displays); dp != "" {
+		if resourcePrompt != "" {
+			resourcePrompt = resourcePrompt + "\n\n" + dp
+		} else {
+			resourcePrompt = dp
+		}
+	}
 	setup, err := buildAgentCommand(agent, identityPrompt, cwd, req.LastSessionID, resourcePrompt, req.SystemPrompt)
 	if err != nil {
 		return nil, err

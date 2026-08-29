@@ -70,6 +70,8 @@ func main() {
 		runWD(os.Args[2:])
 	case "resource":
 		runResource(os.Args[2:])
+	case "acquire":
+		runAcquire(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
 	case "secret":

@@ -25,8 +25,17 @@ func (d *Daemon) handleResourceList(conn net.Conn, _ ipcRequest) {
 		sendControl(conn, ipcResponse{Type: "error", Message: "daemon offline from server"})
 		return
 	}
+	// Attribute to the caller (CP1 discovery gate, docs/capability-provisioning.md
+	// §6): an agent subprocess resolves to its agent principal and is gated behind
+	// a discovery grant; a human operator at the terminal resolves to the host
+	// owner and passes freely. Same tree-walk the `hh … list` CRUD path uses.
+	principalKind, principalID, identityErr := d.derivePrincipal(conn, "", "", "resource_list")
+	if identityErr != nil {
+		sendControl(conn, ipcResponse{Type: "error", Message: identityErr.Message})
+		return
+	}
 	payload, _ := json.Marshal(map[string]string{"host_id": d.hostID})
-	raw, err := d.daemonWS.SendWSRequest(generateUUID(), "resource_connections_list", payload)
+	raw, err := d.daemonWS.SendWSRequestAs(generateUUID(), "resource_connections_list", payload, principalKind, principalID)
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: "ws_request: " + err.Error()})
 		return

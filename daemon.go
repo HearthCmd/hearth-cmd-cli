@@ -149,6 +149,10 @@ type ipcRequest struct {
 	// NULL peg), in which case buildAgentCommand + installHearthInstructions
 	// fall back to the compiled-in hearthSystemPromptFallback const.
 	SystemPrompt string `json:"-"`
+	// Displays is a JSON array of household screens this agent may publish to
+	// ([{id,name}]), from spawn_context.displays (CP4). buildDisplayPrompt renders
+	// a competence section from it so the agent knows `hearth display publish`.
+	Displays string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
@@ -2194,6 +2198,8 @@ var gatedHouseholdCRUD = map[string]bool{
 	"create_agent_job_description": true, "update_agent_job_description": true, "archive_agent_job_description": true,
 	"update_organization": true, "archive_organization": true,
 	"add_organization_member": true, "remove_organization_member": true,
+	// acquire (CP2) blocks server-side on a human approval, like a gated CRUD.
+	"acquire": true,
 }
 
 // handleIdentity returns the daemon's cached account/org state along with

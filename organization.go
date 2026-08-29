@@ -31,7 +31,18 @@ func (r *repeatedStringFlag) Set(v string) error {
 
 // sendWSRequest connects to the daemon IPC socket and sends a ws_request,
 // returning the raw JSON response from the server.
+// sendWSRequest sends a CRUD ws_request through the daemon with the default 30s
+// read deadline. For a msg_type that can block server-side on a human approval
+// (e.g. `acquire`), use sendWSRequestDeadline with a longer window.
 func sendWSRequest(msgType string, data map[string]interface{}) (json.RawMessage, error) {
+	return sendWSRequestDeadline(msgType, data, 30*time.Second)
+}
+
+// sendWSRequestDeadline is sendWSRequest with a caller-chosen read deadline. The
+// 30s default is long enough for any normal WS round-trip and short enough that a
+// hung daemon surfaces as an error; a request the relay may park on a human
+// approval needs a window matching the daemon's household-ask timeout.
+func sendWSRequestDeadline(msgType string, data map[string]interface{}, readDeadline time.Duration) (json.RawMessage, error) {
 	conn, err := net.DialTimeout("unix", daemonSockPath(), 5*time.Second)
 	if err != nil {
 		return nil, daemonDialError(err)
@@ -57,11 +68,7 @@ func sendWSRequest(msgType string, data map[string]interface{}) (json.RawMessage
 		return nil, fmt.Errorf("failed to send request: %v", err)
 	}
 
-	// 30s read deadline matches the daemon-side WS SendWSRequest
-	// default — long enough for any normal WS round-trip, short
-	// enough that a hung daemon surfaces as an error instead of
-	// the CLI appearing to hang forever.
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(readDeadline))
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
@@ -999,10 +1006,12 @@ func runOrganizationAgent(args []string) {
 		name := fs.String("name", "", "Human-readable name")
 		// D2e talk allowlists (§4.2). Repeatable; comma-separated values also
 		// accepted. Both directions are needed for an actual agent→agent wake.
-		var canBeWokenBy, canSendTo repeatedStringFlag
+		var canBeWokenBy, canSendTo, grantResources repeatedStringFlag
 		fs.Var(&canBeWokenBy, "can-be-woken-by", "Agent, household member, or shared-device ID allowed to wake this agent (repeatable). Discover ids with 'hearth hh agent list' / 'hearth hh user list' / 'hearth hh device list'.")
 		fs.Var(&canSendTo, "can-send-to", "Agent ID this agent may send to / wake (repeatable). Agents only; discover ids with 'hearth hh agent list'.")
+		fs.Var(&grantResources, "grant-resource", "Resource connection ID to grant this agent at creation (repeatable). Pre-provisions a capability so the agent never has to stop mid-task to `hearth acquire` it. Discover ids with 'hearth resource list'.")
 		hostID := fs.String("host-id", "", "Host on which the agent should run (defaults to this host; new hosts must be enrolled via 'hearth start' on that machine — list ids with 'hearth hh host list')")
+		allowDiscovery := fs.Bool("allow-discovery", false, "Let this agent enumerate household entities (other agents, positions, members, devices, hosts, resource connections, secrets). Default off (least-knowledge): the agent can still be granted specific entities via 'hearth acquire'. See docs/capability-provisioning.md.")
 		temp := fs.Bool("temp", false, "Skip all prompts and spawn a disposable agent in the current directory (override with --wd). Flags still override individual defaults; unset ones fall back to: host=this host, harness=first listed, model=first listed, name='Temp <id>'. Temp agents auto-rename from their first user message and group separately in the iOS agent list.")
 		wd := fs.String("wd", "", "Working directory for the temp agent (defaults to the current directory). Repeat invocations in the same directory reuse the wd row; if an agent is already active there you'll be asked whether to sleep it and replace.")
 		fs.Parse(args[1:])
@@ -1087,6 +1096,12 @@ func runOrganizationAgent(args []string) {
 		}
 		if len(canSendTo) > 0 {
 			payload["talk_outbound_agent_ids"] = []string(canSendTo)
+		}
+		if *allowDiscovery {
+			payload["allow_discovery"] = true
+		}
+		if len(grantResources) > 0 {
+			payload["grant_resource_connection_ids"] = []string(grantResources)
 		}
 		data := sendCreateOrUpdateResolvingCollision("create_ai_agent_instance", "agent", "retire", "name", payload)
 		printJSON(data)
