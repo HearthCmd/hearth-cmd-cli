@@ -257,6 +257,14 @@ type Daemon struct {
 	humanUserID   string    // resolved human_user ID (for logs and kept-for-compat IPC)
 	startedAt     time.Time // process start; reported to `hearth status`
 
+	// display is the LAN display subsystem, non-nil only when this host carries
+	// the display role (role-aware unified daemon, docs/household-display-plan.md
+	// §1). It shares the daemon's single /ws/daemon connection — the whole point of
+	// unifying is one host, one connection, subsystems multiplexed. displayStop
+	// tears down its HTTP server + control socket on Shutdown.
+	display     *displayServer
+	displayStop func()
+
 	// Identity cache populated by server pushes on /ws/daemon. Served to
 	// `hearth status` via the "identity" IPC request so the CLI doesn't
 	// have to round-trip the server for every status invocation.
@@ -815,6 +823,13 @@ func runDaemonForeground() {
 	// for transcript, permissions, and control messages.
 	d.startDaemonWS()
 
+	// Role-aware: if this host carries the display role, activate the display
+	// subsystem over the SAME connection (one host, one /ws/daemon). Pure agent
+	// hosts skip this entirely, so their path is untouched. See §1 of the plan.
+	if hostHasDisplayRole() {
+		d.startDisplaySubsystem()
+	}
+
 	// Handle shutdown signals
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -827,6 +842,74 @@ func runDaemonForeground() {
 	d.Run()
 
 	log.Printf("daemon: stopped")
+}
+
+// startDisplaySubsystem activates the LAN display server on a role-display host,
+// driven over the daemon's single /ws/daemon connection (docs/household-display-plan.md
+// §1). Screen pairing, the HTTP kiosk server, the local control socket, and the
+// relay heartbeat all come up here; relay display_publish/clear frames route in via
+// the daemon WS (setDisplayFrameFunc). Non-fatal: a box that can't bind the port
+// still runs as a host.
+func (d *Daemon) startDisplaySubsystem() {
+	ds := newDisplayServer()
+
+	// Pair the screen if it hasn't been claimed yet (same flow as standalone).
+	if readConfigValue("display_claimed") != "1" {
+		provisionAndPairScreen(ds)
+	}
+
+	stop, err := ds.serve(displayBindAddr())
+	if err != nil {
+		log.Printf("daemon: display subsystem failed to start: %v", err)
+		return
+	}
+
+	// Report display_state and receive publish/clear over the daemon's own
+	// connection instead of opening a second client for the same host_id.
+	ds.attachTransport(d.daemonWS)
+	d.daemonWS.setDisplayFrameFunc(ds.handleRelayFrame)
+
+	d.display = ds
+	d.displayStop = stop
+	log.Printf("daemon: display subsystem active (role=display) on %s", displayBindAddr())
+}
+
+// hostHasDisplayRole reports whether this host carries the display role. Roles are
+// server-authoritative; the daemon reads a local hint (config key "roles",
+// comma-joined) written at enrollment / by `hearth display` to decide which
+// subsystems to activate at boot. Absent or agent-only → no display subsystem.
+func hostHasDisplayRole() bool {
+	return rolesCSVIncludes(readConfigValue("roles"), "display")
+}
+
+// hostHasAgentRole reports whether this host runs agents. A blank/legacy roles
+// hint reads as agent (the whole pre-roles fleet), so only a host explicitly
+// enrolled display-only lacks it.
+func hostHasAgentRole() bool {
+	roles := readConfigValue("roles")
+	if roles == "" {
+		return true
+	}
+	return rolesCSVIncludes(roles, "agent")
+}
+
+// displayBindAddr is the LAN address the display subsystem serves on (config key
+// "display_bind"), defaulting to all interfaces on :8090.
+func displayBindAddr() string {
+	if b := readConfigValue("display_bind"); b != "" {
+		return b
+	}
+	return "0.0.0.0:8090"
+}
+
+// rolesCSVIncludes reports whether a comma-joined roles string contains role.
+func rolesCSVIncludes(csv, role string) bool {
+	for _, r := range strings.Split(csv, ",") {
+		if strings.TrimSpace(r) == role {
+			return true
+		}
+	}
+	return false
 }
 
 // Run accepts connections and handles them until the daemon is shut down.
@@ -881,6 +964,12 @@ func (d *Daemon) Shutdown() {
 	}()
 
 	d.setHostDesiredStatus("disconnected")
+
+	// Tear down the display subsystem (HTTP server + control socket) if this host
+	// carried the display role. Independent of the agent drain below.
+	if d.displayStop != nil {
+		d.displayStop()
+	}
 
 	// Snapshot the current instance map so we don't hold the lock while
 	// each Stop() blocks for up to agentStopGrace. The per-instance

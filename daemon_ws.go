@@ -56,7 +56,7 @@ type DaemonWS struct {
 	// the relay asks this host — the one holding the HA connection — to speak a
 	// message on a voice satellite on behalf of a (possibly parked) agent, by
 	// invoking the HA announce verb. Wired to Daemon.handleAnnounceSatellite.
-	announceSatelliteFunc func(aiAgentInstanceID, connection, entityID, message string)
+	announceSatelliteFunc func(aiAgentInstanceID, connection, entityID, message string, listen bool)
 
 	// Identity-cache callbacks. Server pushes "account",
 	// "organizations_list", and "agent_home_path" on connect (and on
@@ -94,6 +94,13 @@ type DaemonWS struct {
 	// above: this layer does not know about plugin state, and should not
 	// start now.
 	installPluginFunc func(slug, version string, upgrade, force, allowBreaking bool)
+
+	// displayFrameFunc, when set (role-aware daemon with the display role),
+	// receives relay→host display_publish / display_clear frames and applies them
+	// to the local display subsystem. Set by (*Daemon).startDisplaySubsystem to
+	// displayServer.handleRelayFrame; nil on pure agent hosts. This is how the
+	// unified daemon drives screens over its single /ws/daemon connection.
+	displayFrameFunc func([]byte) bool
 }
 
 // agentWS is a per-agent-instance handle to the shared daemon WebSocket.
@@ -192,6 +199,23 @@ func (d *DaemonWS) UpdateAuth(url, bearer string) {
 // IsConnected returns whether the WebSocket is connected.
 func (d *DaemonWS) IsConnected() bool {
 	return d.ws.IsConnected()
+}
+
+// SendText sends an UNtagged text frame on the shared connection (no
+// ai_agent_instance_id — unlike agentWS.SendText). The role-aware daemon uses it
+// to report display state, which the relay routes by host, not instance. This
+// makes *DaemonWS a displayTransport.
+func (d *DaemonWS) SendText(data []byte) {
+	d.ws.SendText(data)
+}
+
+// setDisplayFrameFunc wires the display subsystem's frame handler so relay→host
+// display_publish / display_clear frames reach it. Set once when a role-display
+// daemon activates the display subsystem.
+func (d *DaemonWS) setDisplayFrameFunc(fn func([]byte) bool) {
+	d.mu.Lock()
+	d.displayFrameFunc = fn
+	d.mu.Unlock()
 }
 
 // RegisterAgentInstance creates a per-instance handle for the given ID.
@@ -353,6 +377,10 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		Connection string `json:"connection"`
 		EntityID   string `json:"entity_id"`
 		Message    string `json:"message"`
+		// Listen asks the satellite to re-open its microphone after speaking, so
+		// the household can answer without the wake word. The relay sends a
+		// boolean, never a verb name — see handleAnnounceSatellite.
+		Listen bool `json:"listen"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
@@ -478,7 +506,7 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 		// round-trip plus the HA call, and blocking here would stall every other
 		// frame.
 		if d.announceSatelliteFunc != nil {
-			go d.announceSatelliteFunc(msg.AIAgentInstanceID, msg.Connection, msg.EntityID, msg.Message)
+			go d.announceSatelliteFunc(msg.AIAgentInstanceID, msg.Connection, msg.EntityID, msg.Message, msg.Listen)
 		}
 	default:
 		log.Printf("daemon-ws: unknown control message: %s", msg.Type)
@@ -501,6 +529,16 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return false
+	}
+
+	// Display frames (relay→host publish/clear) carry no ai_agent_instance_id and
+	// are routed to the display subsystem on a role-display daemon. handleRelayFrame
+	// only consumes display_publish/display_clear, so this is inert on agent hosts.
+	d.mu.RLock()
+	displayFn := d.displayFrameFunc
+	d.mu.RUnlock()
+	if displayFn != nil && displayFn(data) {
+		return true
 	}
 
 	// Identity pushes carry no ai_agent_instance_id. Route them before

@@ -1543,7 +1543,7 @@ func firstModelID(orgID string) (string, error) {
 
 func runOrganizationHost(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: hearth hh host <list|get|rename|forget|check>\n")
+		fmt.Fprintf(os.Stderr, "Usage: hearth hh host <list|get|rename|role|forget|check>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -1623,6 +1623,8 @@ func runOrganizationHost(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
+	case "role":
+		runHostRole(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "hearth hh host: unknown command %q\n", args[0])
 		os.Exit(1)

@@ -76,26 +76,60 @@ func TestRouteControlFrame_SleepFiresSleepFunc(t *testing.T) {
 	}
 }
 
-func TestRouteControlFrame_AnnounceSatelliteFiresFunc(t *testing.T) {
+type announceCall struct {
+	agent, conn, entity, msg string
+	listen                   bool
+}
+
+// announceRoute dispatches one announce_satellite frame and returns the call the
+// daemon made. Dispatched on a goroutine (does network IO), so it waits.
+func announceRoute(t *testing.T, frame string) announceCall {
+	t.Helper()
 	d := newTestDaemonWS()
-	type call struct{ agent, conn, entity, msg string }
-	ch := make(chan call, 1)
-	d.announceSatelliteFunc = func(agent, conn, entity, msg string) {
-		ch <- call{agent, conn, entity, msg}
+	ch := make(chan announceCall, 1)
+	d.announceSatelliteFunc = func(agent, conn, entity, msg string, listen bool) {
+		ch <- announceCall{agent, conn, entity, msg, listen}
 	}
-
-	// Dispatched on a goroutine (does network IO), so wait for it.
-	d.routeControlFrame([]byte(`{"type":"announce_satellite","ai_agent_instance_id":"agent-3",` +
-		`"connection":"ha","entity_id":"assist_satellite.kitchen","message":"checking with the household"}`))
-
+	d.routeControlFrame([]byte(frame))
 	select {
 	case c := <-ch:
-		want := call{"agent-3", "ha", "assist_satellite.kitchen", "checking with the household"}
-		if c != want {
-			t.Errorf("announceSatelliteFunc got %+v, want %+v", c, want)
-		}
+		return c
 	case <-time.After(2 * time.Second):
 		t.Fatal("announceSatelliteFunc was not called")
+	}
+	return announceCall{}
+}
+
+func TestRouteControlFrame_AnnounceSatelliteFiresFunc(t *testing.T) {
+	got := announceRoute(t, `{"type":"announce_satellite","ai_agent_instance_id":"agent-3",`+
+		`"connection":"ha","entity_id":"assist_satellite.kitchen","message":"checking with the household"}`)
+
+	want := announceCall{"agent-3", "ha", "assist_satellite.kitchen", "checking with the household", false}
+	if got != want {
+		t.Errorf("announceSatelliteFunc got %+v, want %+v", got, want)
+	}
+}
+
+// The relay sets listen when the agent asked a question and wants the satellite's
+// microphone re-opened. It must survive the frame, because it is what selects
+// start_conversation over announce on the far side.
+func TestRouteControlFrame_AnnounceSatelliteCarriesListen(t *testing.T) {
+	got := announceRoute(t, `{"type":"announce_satellite","ai_agent_instance_id":"a",`+
+		`"connection":"ha","entity_id":"e","message":"Which one, the blue or the grey?","listen":true}`)
+
+	if !got.listen {
+		t.Error("listen=true did not survive the frame; the follow-up mic would never open")
+	}
+}
+
+// A frame from a relay that predates the flag must speak and stop — the safe
+// direction. Absent means announce, never start_conversation.
+func TestRouteControlFrame_AnnounceSatelliteDefaultsToNotListening(t *testing.T) {
+	got := announceRoute(t, `{"type":"announce_satellite","ai_agent_instance_id":"a",`+
+		`"connection":"ha","entity_id":"e","message":"Done."}`)
+
+	if got.listen {
+		t.Error("a frame with no listen field must not open the microphone")
 	}
 }
 

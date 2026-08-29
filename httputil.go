@@ -200,6 +200,7 @@ type enrollResult struct {
 	HostSecret     string
 	IsNewHost      bool
 	Organizations  []daemonOrgEntry
+	Roles          []string
 }
 
 // enrollHost claims a host_id for the authenticated user via /hosts/enroll
@@ -217,8 +218,8 @@ type enrollResult struct {
 // (transfer_host removed in phase 3 step 8). Empty here means "let the
 // server pick" (default to earliest-joined org, or bootstrap-create for
 // brand-new users).
-func enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy string) (enrollResult, error) {
-	payload := map[string]string{
+func enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy string, roles []string) (enrollResult, error) {
+	payload := map[string]interface{}{
 		"host_id": hostID,
 		"mode":    mode,
 	}
@@ -242,6 +243,11 @@ func enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName
 	// only on fresh INSERTs — reclaim preserves the existing rule.
 	if approvalPolicy != "" {
 		payload["approval_policy"] = approvalPolicy
+	}
+	// Roles: the jobs this box takes on ("display" for a screen box). Server
+	// consults only on fresh INSERTs — reclaim preserves the existing set.
+	if len(roles) > 0 {
+		payload["roles"] = roles
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -275,6 +281,7 @@ func enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName
 		OrganizationID string           `json:"organization_id"`
 		IsNewHost      bool             `json:"is_new_host"`
 		Organizations  []daemonOrgEntry `json:"organizations"`
+		Roles          []string         `json:"roles"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return enrollResult{}, fmt.Errorf("failed to decode response: %w", err)
@@ -290,6 +297,7 @@ func enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName
 		HostSecret:     raw.HostSecret,
 		IsNewHost:      raw.IsNewHost,
 		Organizations:  raw.Organizations,
+		Roles:          raw.Roles,
 	}, nil
 }
 

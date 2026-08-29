@@ -69,6 +69,15 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest, princi
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.
 func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd, modelProvider, modelName, jobTitle, jobMandate, organizationName, lastSessionID, systemPrompt string) (int, error) {
+	// Backstop (docs/household-display-plan.md §1): a display-only host drives
+	// screens and runs no agents. The server rejects placing an agent here, but if
+	// one ever reaches this daemon (e.g. an agent predating a role removal), refuse
+	// rather than half-spawn a harness on an appliance. Defense in depth behind the
+	// server-side guard.
+	if !hostHasAgentRole() {
+		return 0, fmt.Errorf("this host is a display server (no agent role); it does not run agents")
+	}
+
 	localAgent := localAgentForHarness(harnessName)
 	if localAgent == "" {
 		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)

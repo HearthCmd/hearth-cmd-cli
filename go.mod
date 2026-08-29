@@ -4,6 +4,7 @@ go 1.25.13
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/yuin/goldmark v1.8.5
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1

@@ -62,6 +62,8 @@ func main() {
 		runStop(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
+	case "display":
+		runDisplay(os.Args[2:])
 	case "hh":
 		runOrganization(os.Args[2:])
 	case "wd":
@@ -112,6 +114,7 @@ Commands:
   start      Start the daemon on this host
   stop       Stop the daemon on this host
   status     Show daemon status on this host
+  display    Drive a wall screen from this host (LAN kiosk server)
   logout     Sign out on this machine (stops the host, revokes creds, clears config)
 
   hh         Manage household entities (household, user, job_description, position, agent, ai_model, harness, host, device, invite)

@@ -443,6 +443,15 @@ func requestPluginList() (plugins []struct {
 	return inner.Plugins, inner.PluginsDir
 }
 
+// formatHostRoles renders a host's role set for display: "agent" when blank (the
+// whole existing fleet is agent hosts), else the comma-joined set.
+func formatHostRoles(roles []string) string {
+	if len(roles) == 0 {
+		return "agent"
+	}
+	return strings.Join(roles, ",")
+}
+
 func printFleetHostsSection(out *os.File, ident *ipcResponse, hosts []hostsListEntry) {
 	fmt.Fprintln(out, "HOSTS")
 	if len(hosts) == 0 {
@@ -451,7 +460,7 @@ func printFleetHostsSection(out *os.File, ident *ipcResponse, hosts []hostsListE
 		return
 	}
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "  HOSTNAME\tHOST_ID\tDESIRED\tLAST SEEN\t")
+	fmt.Fprintln(tw, "  HOSTNAME\tHOST_ID\tROLES\tDESIRED\tLAST SEEN\t")
 	for _, h := range hosts {
 		marker := "  "
 		if h.HostID == ident.HostID {
@@ -465,7 +474,7 @@ func printFleetHostsSection(out *os.File, ident *ipcResponse, hosts []hostsListE
 		if desired == "" {
 			desired = "?"
 		}
-		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t\n", marker, name, shortID(h.HostID), desired, humanLastSeen(h.LastSeenAt))
+		fmt.Fprintf(tw, "%s%s\t%s\t%s\t%s\t%s\t\n", marker, name, shortID(h.HostID), formatHostRoles(h.Roles), desired, humanLastSeen(h.LastSeenAt))
 	}
 	tw.Flush()
 	fmt.Fprintln(out)
@@ -561,11 +570,12 @@ func requestStatus() ([]instanceInfo, error) {
 }
 
 type hostsListEntry struct {
-	HostID        string `json:"host_id"`
-	Hostname      string `json:"hostname"`
-	DesiredStatus string `json:"desired_status"`
-	LastSeenAt    string `json:"last_seen_at"`
-	AgentHomePath  string `json:"agent_home_path"`
+	HostID        string   `json:"host_id"`
+	Hostname      string   `json:"hostname"`
+	DesiredStatus string   `json:"desired_status"`
+	LastSeenAt    string   `json:"last_seen_at"`
+	AgentHomePath string   `json:"agent_home_path"`
+	Roles         []string `json:"roles"` // 'agent' and/or 'display'; blank reads as agent
 }
 
 func fetchHosts() []hostsListEntry {

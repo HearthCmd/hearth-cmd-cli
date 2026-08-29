@@ -269,11 +269,16 @@ func resolveTargetOrgID(reader *bufio.Reader, baseURL, sessionToken, orgArg stri
 
 func runRegister(args []string) {
 	var email, orgArg, approvalPolicyArg string
+	var displayFlag bool
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--help" || a == "-h" {
-			fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--org <slug-or-id>] [--approval-policy owner_only|org_members]\n")
+			fmt.Fprintf(os.Stderr, "Usage: hearth login <email> [--org <slug-or-id>] [--approval-policy owner_only|org_members] [--display]\n")
 			os.Exit(0)
+		}
+		if a == "--display" {
+			displayFlag = true
+			continue
 		}
 		if a == "--org" {
 			if i+1 >= len(args) {
@@ -416,7 +421,14 @@ func runRegister(args []string) {
 		approvalPolicy = promptApprovalPolicy(reader)
 	}
 
-	enroll, err := enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy)
+	// A display box enrolls with roles {display}; a normal login sends nothing
+	// (server defaults to agent). The server applies roles only on a fresh
+	// insert — reclaim of an existing host preserves its roles.
+	var enrollRoles []string
+	if displayFlag {
+		enrollRoles = []string{"display"}
+	}
+	enroll, err := enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy, enrollRoles)
 	if err != nil {
 		if mode != "reclaim" {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -449,7 +461,7 @@ func runRegister(args []string) {
 		if approvalPolicy == "" {
 			approvalPolicy = promptApprovalPolicy(reader)
 		}
-		enroll, err = enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy)
+		enroll, err = enrollHost(baseURL, sessionToken, hostID, hostname, mode, userName, orgName, targetOrgID, approvalPolicy, enrollRoles)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -494,6 +506,33 @@ func runRegister(args []string) {
 	fmt.Fprintf(os.Stderr, "Enrolled host %s (io_device %s)\n", hostID, enroll.IODeviceID)
 	if enroll.OrganizationID != "" {
 		fmt.Fprintf(os.Stderr, "Current household: %s\n", enroll.OrganizationID)
+	}
+	// Seed the local roles hint so the role-aware daemon activates the right
+	// subsystems at boot (the server is SOT for roles; this is the boot-time hint
+	// hostHasDisplayRole reads before the WS is up). Kept in sync on later changes
+	// by `hearth hh host role`.
+	if len(enroll.Roles) > 0 {
+		writeConfigValue("roles", strings.Join(enroll.Roles, ","))
+	}
+	if displayFlag {
+		hasDisplay := false
+		for _, r := range enroll.Roles {
+			if r == "display" {
+				hasDisplay = true
+				break
+			}
+		}
+		if hasDisplay {
+			fmt.Fprintln(os.Stderr,
+				"This host is a display server — it drives screens and will NOT run agents.\n"+
+					"If this same computer should also run agents, run `hearth start` here to add the agent role.")
+		} else {
+			// Reclaim of an existing host: the server preserved its roles, so
+			// --display was a no-op. Point the user at the additive path.
+			fmt.Fprintln(os.Stderr,
+				"Note: this host was already enrolled and keeps its roles ("+strings.Join(enroll.Roles, ", ")+").\n"+
+					"To make it drive screens too, run `hearth hh host role add display`.")
+		}
 	}
 	// Mismatch between the org the user asked for and the org the server
 	// stamped on the host means this host is already bound — login can't

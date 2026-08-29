@@ -166,7 +166,7 @@ func TestEnrollHost_HappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := enrollHost(srv.URL, "tok-x", "host-1", "alice-mac", "fresh", "Alice", "Alice Co", "", "")
+	got, err := enrollHost(srv.URL, "tok-x", "host-1", "alice-mac", "fresh", "Alice", "Alice Co", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestEnrollHost_OmitsBlankOptionalFields(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	_, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", "")
+	_, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestEnrollHost_IncompleteResponseErrors(t *testing.T) {
 		_, _ = w.Write([]byte(`{"io_device_id":"d"}`))
 	}))
 	defer srv.Close()
-	if _, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", ""); err == nil {
+	if _, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", "", nil); err == nil {
 		t.Error("incomplete response must error")
 	}
 }
@@ -232,7 +232,7 @@ func TestEnrollHost_NonOKStatusErrors(t *testing.T) {
 		w.WriteHeader(400)
 	}))
 	defer srv.Close()
-	if _, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", ""); err == nil {
+	if _, err := enrollHost(srv.URL, "tok", "h", "", "fresh", "", "", "", "", nil); err == nil {
 		t.Error("400 must surface")
 	}
 }
