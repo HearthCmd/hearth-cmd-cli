@@ -124,7 +124,23 @@ type PluginManifest struct {
 	// required before installing.
 	AuthScheme string `yaml:"auth_scheme,omitempty"` // see AuthScheme* constants
 
-	Credentials  []PluginCredential  `yaml:"credentials"`
+	Credentials []PluginCredential `yaml:"credentials"`
+
+	// CredentialsRaw is the same credentials block, kept untyped, and is what
+	// gets reported to the server (plugin_installs.credential_specs).
+	//
+	// The daemon reads credentials through the typed struct above, because it
+	// only acts on fields it understands. The SERVER is a different matter: it
+	// reads specs for things the daemon has no part in — OAuth scopes today,
+	// and the authorize/token endpoints that let a new OAuth plugin ship as a
+	// manifest with no code (relay/cmd/hearth-cloud/oauth_generic_provider.go).
+	// Marshalling the typed struct silently dropped anything this binary
+	// predates, which put a CLI release and a fleet rollout in front of every
+	// new credential attribute. Forwarding verbatim removes that permanently.
+	//
+	// Set by ParseManifest; nil for manifests with no credentials block.
+	CredentialsRaw []map[string]any `yaml:"-"`
+
 	Executable   string              `yaml:"executable"`
 	Verbs        []PluginVerb        `yaml:"verbs"`
 	DefaultRules []PluginDefaultRule `yaml:"default_rules"`
@@ -399,6 +415,16 @@ func ParseManifest(data []byte) (PluginManifest, error) {
 	var m PluginManifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return PluginManifest{}, fmt.Errorf("manifest yaml parse: %w", err)
+	}
+	// Second pass to keep the credentials block in its untyped form. See
+	// CredentialsRaw — a field this binary has never heard of must still
+	// reach the server, or every new credential attribute costs a CLI
+	// release and a fleet rollout.
+	var raw struct {
+		Credentials []map[string]any `yaml:"credentials"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err == nil {
+		m.CredentialsRaw = raw.Credentials
 	}
 	return m, nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,8 +44,15 @@ const (
 // decrypted refresh token for a short-lived access token via the
 // server's exchange_oauth_token WS handler. The server holds the
 // OAuth client_secret and calls the upstream provider.
+//
+// connectionID names the resource connection the token belongs to. The server
+// needs it for upstreams where each household registers its OWN app: the
+// client id to refresh as lives in that connection's config, and a rotated
+// refresh token has to be written back to that connection's secret. It is
+// empty for connectionless callers, which is correct for every provider
+// configured from the server's environment.
 type OAuthTokenExchanger interface {
-	ExchangeOAuthToken(ctx context.Context, provider string, refreshToken []byte) (accessToken string, expiresIn int, err error)
+	ExchangeOAuthToken(ctx context.Context, provider string, refreshToken []byte, connectionID string) (accessToken string, expiresIn int, err error)
 }
 
 type DeclarativeExecutor struct {
@@ -236,6 +244,22 @@ var templateFuncs = map[string]func(string) string{
 	// Lets HA's service URLs say turn_on of "{{domain(args.entity_id)}}"
 	// → "light" → /api/services/light/turn_on.
 	"domain": entityIDDomain,
+
+	// urlquery percent-encodes its input for use as a query-string VALUE.
+	//
+	// Needed by any verb whose query carries text a person actually typed —
+	// Spotify's search takes "Simon & Garfunkel", which unescaped ends the
+	// q parameter at the ampersand and sends a request line containing a
+	// raw space. The "#" case is worse than a failure: url.Parse reads it as
+	// the start of a fragment and drops the rest of the query silently, so a
+	// search for "Track #1" quietly becomes a search for "Track ".
+	//
+	// Encodes a space as %20 rather than "+". Both are legal in a query
+	// string, but "+" is only understood as a space by readers applying
+	// form-encoding rules, and not every upstream does.
+	"urlquery": func(s string) string {
+		return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+	},
 }
 
 // errTemplatePathNotSet marks a {{path}} whose key is absent from scope.

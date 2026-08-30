@@ -52,6 +52,11 @@ type DaemonWS struct {
 	// kickoff, and ack. Wired to Daemon.handleScheduledTriggerFire.
 	scheduledTriggerFireFunc func(raw json.RawMessage)
 
+	// agentTaskFunc handles a server-pushed agent_task (onboarding): wake the
+	// target agent if asleep and inject a reasoning prompt. Wired to
+	// Daemon.handleAgentTask.
+	agentTaskFunc func(raw json.RawMessage)
+
 	// announceSatelliteFunc handles a server-pushed announce_satellite (voice V5b):
 	// the relay asks this host — the one holding the HA connection — to speak a
 	// message on a voice satellite on behalf of a (possibly parked) agent, by
@@ -609,6 +614,15 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		// and blocks, which must not stall the WS read loop.
 		if d.scheduledTriggerFireFunc != nil {
 			go d.scheduledTriggerFireFunc(data)
+		}
+		return true
+	case "agent_task":
+		// Onboarding: a system-initiated reasoning task for a specific agent (the
+		// Facilitator). Carries ai_agent_instance_id but is handled here, above the
+		// agent-id routing guard, because wake+wait+inject blocks and must run in
+		// its own goroutine off the WS read loop.
+		if d.agentTaskFunc != nil {
+			go d.agentTaskFunc(data)
 		}
 		return true
 	}

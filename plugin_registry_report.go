@@ -100,9 +100,13 @@ func (d *Daemon) reportPluginInstallsAtBoot() {
 				log.Printf("daemon: report_plugin_installs marshal config_schema for %s: %v", m.PluginSlug, err)
 			}
 		}
+		// Report the manifest's credentials block verbatim (CredentialsRaw), so
+		// attributes this binary doesn't model still reach the server — the
+		// server acts on fields the daemon has no part in. Fall back to the
+		// typed struct only if the untyped pass produced nothing.
 		var credentialSpecs json.RawMessage
-		if len(m.Credentials) > 0 {
-			if b, err := json.Marshal(m.Credentials); err == nil {
+		if src := credentialSpecSource(m); src != nil {
+			if b, err := json.Marshal(src); err == nil {
 				credentialSpecs = b
 			} else {
 				log.Printf("daemon: report_plugin_installs marshal credential_specs for %s: %v", m.PluginSlug, err)
@@ -162,4 +166,22 @@ func (d *Daemon) reportPluginInstallsAtBoot() {
 	}
 	log.Printf("daemon: reported %d plugin install(s) to server (upserted %d)",
 		resp.Reported, resp.Upserted)
+}
+
+// credentialSpecSource picks what to send as plugin_installs.credential_specs.
+//
+// Prefer the untyped block straight from the manifest, so a credential
+// attribute this binary predates still reaches the server (see
+// PluginManifest.CredentialsRaw). Fall back to the typed struct for the one
+// case that can't produce it — a manifest built in memory rather than parsed,
+// which is how most tests construct one. Returns nil when there are no
+// credentials at all, so the field is omitted rather than sent as "null".
+func credentialSpecSource(m PluginManifest) any {
+	if len(m.CredentialsRaw) > 0 {
+		return m.CredentialsRaw
+	}
+	if len(m.Credentials) > 0 {
+		return m.Credentials
+	}
+	return nil
 }

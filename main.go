@@ -72,6 +72,10 @@ func main() {
 		runResource(os.Args[2:])
 	case "acquire":
 		runAcquire(os.Args[2:])
+	case "propose-onboarding":
+		runProposeOnboarding(os.Args[2:])
+	case "presence":
+		runPresence(os.Args[2:])
 	case "run":
 		runRun(os.Args[2:])
 	case "secret":

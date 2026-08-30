@@ -1217,6 +1217,7 @@ func (d *Daemon) startDaemonWS() {
 	d.daemonWS.wakeFunc = d.handleWakeAgentInstance
 	d.daemonWS.cycleFunc = d.handleCycleAgentInstance
 	d.daemonWS.scheduledTriggerFireFunc = d.handleScheduledTriggerFire
+	d.daemonWS.agentTaskFunc = d.handleAgentTask
 	d.daemonWS.inboxResolvedFunc = d.handleInboxResolved
 	d.daemonWS.announceSatelliteFunc = d.handleAnnounceSatellite
 	d.daemonWS.accountFunc = d.SetAccount
@@ -1306,6 +1307,20 @@ func (d *Daemon) startDaemonWS() {
 		log.Printf("daemon: WARNING WebSocket not connected after 5s, proceeding anyway")
 	}
 	log.Printf("daemon: WebSocket started (human_user %s, host %s)", d.humanUserID, d.hostID)
+
+	// Passive, server-controlled update nudge. The server (not GitHub) decides
+	// via HEARTH_RECOMMENDED_CLI; we only log when we're actually behind. Async
+	// + fail-soft so it never delays or blocks startup. The daemon runs for
+	// days, so a startup-only check is the right cadence — users see it in
+	// daemon.log without ever running `hearth update`.
+	go func() {
+		if n := checkServerVersion(10 * time.Second); n != nil {
+			log.Printf("update available: %s", n.summary())
+			if n.UpdateURL != "" {
+				log.Printf("update available: or download %s", n.UpdateURL)
+			}
+		}
+	}()
 
 	// Record the user's intent to be online. The column is strictly
 	// intent-based: only graceful start/stop mutate it.
@@ -1841,7 +1856,7 @@ func (d *Daemon) invokeDeclarativeVerb(
 
 	// Expand typed credentials (e.g. service_account_json → access_token)
 	// before handing the scope to the template engine.
-	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, credentials, config)
+	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, credentials, config, rc.ConnectionID)
 	if expandErr != nil {
 		return InvokeResult{}, &PluginError{Code: ErrInternal, Message: "declarative invoke: expand credentials: " + expandErr.Error()}
 	}
@@ -1885,7 +1900,7 @@ func (d *Daemon) autoRefreshEntitiesOnFirstInvoke(
 			return
 		}
 	}
-	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, credentials, config)
+	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, credentials, config, rc.ConnectionID)
 	if expandErr != nil {
 		log.Printf("daemon: auto-refresh %s: credential expansion failed: %v", rc.ConnectionID, expandErr)
 		return
@@ -2013,7 +2028,7 @@ func (d *Daemon) handleResourceRefresh(conn net.Conn, req ipcRequest) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), resourceInvokeTimeout())
 	defer cancel()
-	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, secretCleartexts, cfg)
+	expandedCreds, expandErr := d.declarativeExecutor.expandCredentials(ctx, manifest.Credentials, secretCleartexts, cfg, rc.ConnectionID)
 	if expandErr != nil {
 		sendControl(conn, ipcResponse{
 			Type:            "error",

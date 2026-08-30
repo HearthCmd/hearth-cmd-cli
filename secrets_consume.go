@@ -146,10 +146,11 @@ func (d *Daemon) handleSecretResolve(conn net.Conn, req ipcRequest) {
 // the upstream provider (Google), then returns a short-lived access
 // token. The refresh token is transmitted in plaintext only over this
 // TLS-encrypted, authenticated channel — it never touches disk.
-func (d *Daemon) ExchangeOAuthToken(_ context.Context, provider string, refreshToken []byte) (string, int, error) {
+func (d *Daemon) ExchangeOAuthToken(_ context.Context, provider string, refreshToken []byte, connectionID string) (string, int, error) {
 	payload, err := json.Marshal(map[string]string{
-		"provider":      provider,
-		"refresh_token": string(refreshToken),
+		"provider":               provider,
+		"refresh_token":          string(refreshToken),
+		"resource_connection_id": connectionID,
 	})
 	if err != nil {
 		return "", 0, fmt.Errorf("exchange_oauth_token marshal: %w", err)

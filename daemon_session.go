@@ -164,6 +164,16 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 			resourcePrompt = dp
 		}
 	}
+	// Append the local/presence competence section (LP2): how to fast-lane an
+	// approval to someone who identifies themselves at a shared voice device.
+	// Static — every agent gets it; only voice-driven turns ever use it.
+	if pp := buildPresencePrompt(); pp != "" {
+		if resourcePrompt != "" {
+			resourcePrompt = resourcePrompt + "\n\n" + pp
+		} else {
+			resourcePrompt = pp
+		}
+	}
 	setup, err := buildAgentCommand(agent, identityPrompt, cwd, req.LastSessionID, resourcePrompt, req.SystemPrompt)
 	if err != nil {
 		return nil, err

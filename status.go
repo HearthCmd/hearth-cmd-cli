@@ -123,6 +123,13 @@ func printVersionSection(out *os.File, ident *ipcResponse) {
 	if ident.ServerURL != "" {
 		fmt.Fprintf(out, "  server: %s\n", ident.ServerURL)
 	}
+	// Server-controlled update nudge, right where a user looks for version info.
+	// Reached only in the connected status path, so the server is known-reachable
+	// and /version_check answers fast; the short timeout bounds a hiccup and a
+	// failed check just prints nothing.
+	if n := checkServerVersion(3 * time.Second); n != nil {
+		fmt.Fprintf(out, "  update: %s\n", n.summary())
+	}
 	fmt.Fprintln(out)
 }
 

@@ -88,6 +88,45 @@ func TestSubstitute_DomainFunctionCall(t *testing.T) {
 	}
 }
 
+func TestSubstitute_URLQueryFunctionCall(t *testing.T) {
+	// The characters that matter are the ones that change what the request
+	// MEANS rather than merely looking wrong: "&" starts a new parameter,
+	// " " breaks the request line, and "#" makes url.Parse discard
+	// everything after it as a fragment.
+	cases := []struct{ in, want string }{
+		{"Simon & Garfunkel", "Simon%20%26%20Garfunkel"},
+		{"Track #1", "Track%20%231"},
+		{"Sigur R\u00f3s", "Sigur%20R%C3%B3s"},
+		{"artist:Miles Davis", "artist%3AMiles%20Davis"},
+		{"plain", "plain"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		scope := map[string]any{"args": map[string]any{"q": c.in}}
+		got, err := substitute("https://api.spotify.com/v1/search?q={{urlquery(args.q)}}&type=track", scope)
+		if err != nil {
+			t.Fatalf("substitute(%q): %v", c.in, err)
+		}
+		want := "https://api.spotify.com/v1/search?q=" + c.want + "&type=track"
+		if got != want {
+			t.Errorf("substitute(%q) = %q; want %q", c.in, got, want)
+		}
+	}
+}
+
+func TestSubstitute_URLQueryEncodesSpaceAsPercent20(t *testing.T) {
+	// url.QueryEscape emits "+" for a space, which only reads as a space to
+	// an upstream applying form-encoding rules. Pin %20, which every reader
+	// agrees on.
+	got, err := substitute("{{urlquery(args.q)}}", map[string]any{"args": map[string]any{"q": "a b"}})
+	if err != nil {
+		t.Fatalf("substitute: %v", err)
+	}
+	if got != "a%20b" {
+		t.Errorf("substitute() = %q; want %q", got, "a%20b")
+	}
+}
+
 func TestSubstitute_UnknownFunctionIsError(t *testing.T) {
 	_, err := substitute("{{not_a_helper(args.x)}}", map[string]any{"args": map[string]any{"x": "y"}})
 	if err == nil || !strings.Contains(err.Error(), "unknown function") {

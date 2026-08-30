@@ -237,6 +237,7 @@ func (x *DeclarativeExecutor) expandCredentials(
 	manifestCreds []PluginCredential,
 	secretMap map[string]string,
 	config map[string]any,
+	connectionID string,
 ) (map[string]any, error) {
 	out := make(map[string]any, len(secretMap))
 	for k, v := range secretMap {
@@ -266,13 +267,35 @@ func (x *DeclarativeExecutor) expandCredentials(
 			}
 			out[mc.Name] = map[string]any{"access_token": token}
 
-		case "oauth2_google":
+		default:
+			// oauth2_<provider>: the credential is a refresh token the server
+			// trades for a short-lived access token (it holds the client
+			// secret; we hold the decryption key). The provider slug is the
+			// suffix — oauth2_google → "google", oauth2_sonos → "sonos" — and
+			// is passed through to the server's provider registry, which is
+			// keyed on exactly that string.
+			//
+			// Deriving the slug rather than switching on each known type is
+			// half of what makes a new OAuth plugin need no code anywhere: the
+			// daemon learns the provider from the manifest, and the relay reads
+			// that plugin's declared endpoints (oauth_generic_provider.go). The
+			// other half is forwarding credential specs verbatim
+			// (plugin_registry_report.go). Hard-coding "oauth2_google" here is
+			// what previously put a CLI release in front of every OAuth plugin.
+			provider, isOAuth := strings.CutPrefix(mc.Type, "oauth2_")
+			if !isOAuth || provider == "" {
+				// Empty type (flat string secret) or a type this binary has
+				// no handling for. Flat secrets are already in `out` from the
+				// copy above; anything else is a manifest written against a
+				// newer daemon, and min_daemon_version is the gate for that.
+				continue
+			}
 			refreshToken, ok := secretMap[mc.Name]
 			if !ok || refreshToken == "" {
 				continue
 			}
 			if x.oauthExchanger == nil {
-				return nil, fmt.Errorf("credential %q: oauth2_google requires an OAuthTokenExchanger (daemon not configured)", mc.Name)
+				return nil, fmt.Errorf("credential %q: %s requires an OAuthTokenExchanger (daemon not configured)", mc.Name, mc.Type)
 			}
 			// Cache keyed by SHA-256 of the refresh token so we don't
 			// log or store the raw token as a map key.
@@ -281,7 +304,7 @@ func (x *DeclarativeExecutor) expandCredentials(
 				out[mc.Name] = map[string]any{"access_token": token}
 				continue
 			}
-			accessToken, expiresIn, err := x.oauthExchanger.ExchangeOAuthToken(ctx, "google", []byte(refreshToken))
+			accessToken, expiresIn, err := x.oauthExchanger.ExchangeOAuthToken(ctx, provider, []byte(refreshToken), connectionID)
 			if err != nil {
 				return nil, fmt.Errorf("credential %q: exchange oauth token: %w", mc.Name, err)
 			}
