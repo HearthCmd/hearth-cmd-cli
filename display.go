@@ -66,62 +66,166 @@ type displayTransport interface {
 	IsConnected() bool
 }
 
-// displayServer holds the LAN-served content for the (single, for 3a) screen on
-// this box and the set of live browser connections to wake on a change.
-type displayServer struct {
-	mu          sync.Mutex
+// screenState is the content + live browsers for ONE screen. A display server
+// keys these by screen io_device_id (§B1 of docs/display-browser-screens-plan.md)
+// so a single host can drive many panels (kitchen, office) independently.
+type screenState struct {
 	ambient     screenAssignment
 	published   screenAssignment
-	pairingCode string // non-empty while the screen is unclaimed: show this code
+	pairingCode string // non-empty while unclaimed: show this code on this screen
 	subs        map[chan struct{}]struct{}
+	// evicts are per-connection "your screen was revoked, close now" signals. Closed
+	// (never sent on) by evictScreen when this screen drops from a display_screens
+	// push, so the /ws/screen handler tears the socket down (§B3).
+	evicts map[chan struct{}]struct{}
+}
+
+func newScreenState() *screenState {
+	return &screenState{
+		subs:   make(map[chan struct{}]struct{}),
+		evicts: make(map[chan struct{}]struct{}),
+	}
+}
+
+// displayServer holds per-screen content and the live browser connections to wake
+// on a change. One host, many screens: the relay routes each display.publish to a
+// screen_id (resolveDisplayScreen, relay display_publish.go) and this server keys
+// content by it. The special key "" is THIS box's own/primary screen — a browser
+// that connects to /ws/screen without an io_device_id, and any relay frame whose
+// screen_id equals this box's own paired screen (primaryID), both resolve to it,
+// so a single-screen box behaves exactly as before browser-as-screen (§B4) lands.
+type displayServer struct {
+	mu        sync.Mutex
+	screens   map[string]*screenState
+	primaryID string // this box's own paired screen io_device_id; collapses onto key ""
+	// known is the relay-pushed set of screens bound to THIS host (display_screens
+	// frame, §B3): screen io_device_id → its credential/metadata. /ws/screen viewers
+	// are validated against it locally (no per-connect relay round trip); a screen
+	// dropping out (revoked) evicts its live sockets. nil until the first push.
+	known map[string]screenCred
+	// screenPairLimiter throttles /screen/pair per LAN client (§B7) so a peer can't
+	// burn the host's shared relay /pair/start budget. The pairing is otherwise
+	// stateless — the browser mints + holds its own secret; this server holds nothing.
+	screenPairLimiter *screenPairLimiter
+	// reapTimers are the presence-grace timers for ephemeral (is_temp) screens whose
+	// last browser has left (§B5): after reapGrace with no reconnect, we ask the relay
+	// to remove the screen. reapGrace <= 0 means the default (defaultReapGrace).
+	reapMu     sync.Mutex
+	reapTimers map[string]*time.Timer
+	reapGrace  time.Duration
 	// relayTx is the link display_state reports go out on. In standalone mode it's
 	// relayWS below; in unified mode the daemon sets it to its own DaemonWS.
 	relayTx displayTransport
 	relayWS *WSClient // standalone-owned /ws/daemon client (nil in unified mode)
 }
 
-func newDisplayServer() *displayServer {
-	return &displayServer{subs: make(map[chan struct{}]struct{})}
+// screenCred is one bound screen as the relay reports it — enough to validate a
+// viewer (secret_hash) and render its identity/temp state.
+type screenCred struct {
+	SecretHash string
+	Name       string
+	IsTemp     bool
 }
 
-func (d *displayServer) current() screenAssignment {
+func newDisplayServer() *displayServer {
+	return &displayServer{
+		screens:           make(map[string]*screenState),
+		known:             make(map[string]screenCred),
+		reapTimers:        make(map[string]*time.Timer),
+		screenPairLimiter: newScreenPairLimiter(),
+	}
+}
+
+// screenKey resolves an addressed screen id to its map key. "" (a browser with no
+// io_device_id) and this box's own screen (primaryID) both live at key "" — the
+// primary screen — so single-screen behavior is unchanged; every other id is its
+// own key. Caller need not hold d.mu (reads primaryID, set once at startup).
+func (d *displayServer) screenKey(id string) string {
+	if id == "" || (d.primaryID != "" && id == d.primaryID) {
+		return ""
+	}
+	return id
+}
+
+// stateLocked returns the screenState for a key, creating it on first use. Caller
+// holds d.mu.
+func (d *displayServer) stateLocked(key string) *screenState {
+	st := d.screens[key]
+	if st == nil {
+		st = newScreenState()
+		d.screens[key] = st
+	}
+	return st
+}
+
+// current returns what THIS box's primary screen (key "") should show — the
+// back-compat accessor used by local publish, display_state reporting, and tests.
+func (d *displayServer) current() screenAssignment { return d.currentForScreen("") }
+
+// currentForScreen resolves the effective content for one screen: its pairing code
+// while unclaimed, else published-if-live else ambient.
+func (d *displayServer) currentForScreen(id string) screenAssignment {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	// While unclaimed, the screen shows its pairing code and nothing else.
-	if d.pairingCode != "" {
-		return screenAssignment{Kind: "pairing", Payload: d.pairingCode}
+	st := d.screens[d.screenKey(id)]
+	if st == nil {
+		return screenAssignment{}
 	}
-	return effectiveContent(d.ambient, d.published, time.Now())
+	if st.pairingCode != "" {
+		return screenAssignment{Kind: "pairing", Payload: st.pairingCode}
+	}
+	return effectiveContent(st.ambient, st.published, time.Now())
 }
 
-// setPublished swaps the published layer and wakes every live screen. The local
-// `hearth display show` path and, later, the relay display.publish route both
-// land here.
-func (d *displayServer) setPublished(a screenAssignment) {
+// setPublished swaps the primary screen's published layer. The local
+// `hearth display show` path lands here; the relay route uses setPublishedForScreen.
+func (d *displayServer) setPublished(a screenAssignment) { d.setPublishedForScreen("", a) }
+
+func (d *displayServer) setPublishedForScreen(id string, a screenAssignment) {
 	d.mu.Lock()
-	d.published = a
+	d.stateLocked(d.screenKey(id)).published = a
 	d.mu.Unlock()
-	d.wakeAll()
+	d.wakeScreen(id)
 }
 
-// setPairing shows a pairing code on the screen (non-empty) or returns to normal
-// content (""). Set while the screen is unclaimed; cleared once a phone claims it.
-func (d *displayServer) setPairing(code string) {
+// setAmbient sets the primary screen's ambient (bottom) layer. Ambient authoring
+// is not a v1 product surface yet; this exists for local defaults and tests.
+func (d *displayServer) setAmbient(a screenAssignment) { d.setAmbientForScreen("", a) }
+
+func (d *displayServer) setAmbientForScreen(id string, a screenAssignment) {
 	d.mu.Lock()
-	d.pairingCode = code
+	d.stateLocked(d.screenKey(id)).ambient = a
 	d.mu.Unlock()
-	d.wakeAll()
+	d.wakeScreen(id)
+}
+
+// setPairing shows a server-pushed pairing code on a screen (non-empty) or returns
+// to normal content (""). Vestigial since browser-as-screen (§B4): the kiosk now
+// runs its own pairing UI from /screen/pair and the server no longer pushes a
+// pairing assignment. Retained (with its test) in case a server-driven pairing
+// display is wanted later; no startup caller today.
+func (d *displayServer) setPairing(code string) { d.setPairingForScreen("", code) }
+
+func (d *displayServer) setPairingForScreen(id, code string) {
+	d.mu.Lock()
+	d.stateLocked(d.screenKey(id)).pairingCode = code
+	d.mu.Unlock()
+	d.wakeScreen(id)
 }
 
 func (d *displayServer) clearPairing() { d.setPairing("") }
 
-// wakeAll signals every live /ws/screen connection to re-send the current
-// assignment. Non-blocking and coalesced (a pending wake covers a new one).
-func (d *displayServer) wakeAll() {
+// wakeScreen signals the live /ws/screen connections for ONE screen to re-send
+// their current assignment, then reports state to the relay. Non-blocking and
+// coalesced (a pending wake covers a new one).
+func (d *displayServer) wakeScreen(id string) {
 	d.mu.Lock()
-	subs := make([]chan struct{}, 0, len(d.subs))
-	for ch := range d.subs {
-		subs = append(subs, ch)
+	var subs []chan struct{}
+	if st := d.screens[d.screenKey(id)]; st != nil {
+		subs = make([]chan struct{}, 0, len(st.subs))
+		for ch := range st.subs {
+			subs = append(subs, ch)
+		}
 	}
 	d.mu.Unlock()
 	for _, ch := range subs {
@@ -130,21 +234,30 @@ func (d *displayServer) wakeAll() {
 		default: // a pending wake already covers this one
 		}
 	}
-	// Report the new content to the relay so display.query can answer from cache.
+	// Report to the relay so display.query answers from cache. NOTE (§B1): the relay
+	// caches per serving_host_id today, so this reports only the primary screen;
+	// per-screen reporting/caching for secondary screens arrives with B2.
 	d.reportState()
 }
 
-func (d *displayServer) subscribe() chan struct{} {
+// subscribe registers a waiter on THIS box's primary screen (back-compat + tests).
+func (d *displayServer) subscribe() chan struct{} { return d.subscribeToScreen("") }
+
+func (d *displayServer) subscribeToScreen(id string) chan struct{} {
 	ch := make(chan struct{}, 1)
 	d.mu.Lock()
-	d.subs[ch] = struct{}{}
+	d.stateLocked(d.screenKey(id)).subs[ch] = struct{}{}
 	d.mu.Unlock()
 	return ch
 }
 
-func (d *displayServer) unsubscribe(ch chan struct{}) {
+func (d *displayServer) unsubscribe(ch chan struct{}) { d.unsubscribeFromScreen("", ch) }
+
+func (d *displayServer) unsubscribeFromScreen(id string, ch chan struct{}) {
 	d.mu.Lock()
-	delete(d.subs, ch)
+	if st := d.screens[d.screenKey(id)]; st != nil {
+		delete(st.subs, ch)
+	}
 	d.mu.Unlock()
 }
 
@@ -152,17 +265,61 @@ func (d *displayServer) unsubscribe(ch chan struct{}) {
 // assignment (reconstruct-on-connect), then re-sends on every content change and
 // on a heartbeat (which also lets an expired TTL fall back to ambient).
 func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := websocket.Accept(w, r, nil)
+	// Which screen this connection is comes from its credential (§B4b): the browser
+	// presents ["hearth.screen.v1", <screen_id>, <secret>] as the WS subprotocol and
+	// the id is authenticated below. Every viewer must present a valid credential —
+	// there is no credential-less path anymore.
+	var screenID string
+
+	// A credentialed browser (§B4) presents its screen id + secret via the WS
+	// subprotocol: ["hearth.screen.v1", <screen_id>, <secret>]. Echo only the protocol
+	// token so the handshake completes; the id/secret are read from the offer here.
+	var credScreenID, credSecret string
+	// CSWSH guard (§B3, display-access-security.md Option 3): AcceptOptions with no
+	// OriginPatterns makes coder/websocket reject any handshake whose Origin doesn't
+	// match the request Host, so a drive-by web page in a household browser can't
+	// script a socket to /ws/screen and exfiltrate the screen. Kept explicit +
+	// test-pinned so a refactor can't silently open it (never set InsecureSkipVerify
+	// or a permissive OriginPatterns here). Direct navigation to IP:8090 has
+	// Origin==Host and is NOT stopped by this — that is what the credential is for.
+	acceptOpts := &websocket.AcceptOptions{}
+	if offered := parseSubprotocols(r.Header.Get("Sec-WebSocket-Protocol")); len(offered) > 0 && offered[0] == screenSubprotocol {
+		acceptOpts.Subprotocols = []string{screenSubprotocol}
+		if len(offered) >= 3 {
+			credScreenID, credSecret = offered[1], offered[2]
+		}
+	}
+	conn, err := websocket.Accept(w, r, acceptOpts)
 	if err != nil {
 		return
 	}
 	defer conn.Close(websocket.StatusInternalError, "closing")
+
+	// Require a valid per-screen credential (§B4b): an absent or invalid credential is
+	// closed with a policy violation, so only a claimed screen bound to this host (in
+	// the relay-pushed `known` set) can stream. A random LAN browser that reaches
+	// IP:8090 gets the kiosk's pair page, never content.
+	if credScreenID == "" {
+		conn.Close(websocket.StatusPolicyViolation, "screen credential required")
+		return
+	}
+	if !d.validScreenCredential(credScreenID, credSecret) {
+		conn.Close(websocket.StatusPolicyViolation, "invalid screen credential")
+		return
+	}
+	screenID = credScreenID
+
 	// CloseRead drains incoming frames (handling pings/close) and gives us a
 	// context cancelled when the browser goes away — this server only writes.
 	ctx := conn.CloseRead(r.Context())
 
+	// A revoked screen force-closes here: evictScreen closes this channel when the
+	// screen drops from a display_screens push, so the loop below tears down.
+	evict := d.subscribeEvict(screenID)
+	defer d.unsubscribeEvict(screenID, evict)
+
 	send := func() error {
-		cur := d.current()
+		cur := d.currentForScreen(screenID)
 		msg := map[string]interface{}{"type": "assignment", "kind": cur.Kind, "payload": cur.Payload}
 		if !cur.ExpiresAt.IsZero() {
 			msg["expires_at"] = cur.ExpiresAt.UTC().Format(time.RFC3339)
@@ -177,14 +334,30 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch := d.subscribe()
-	defer d.unsubscribe(ch)
+	// A live browser cancels any pending presence-grace reap for this screen (§B5).
+	d.cancelReap(screenID)
+
+	ch := d.subscribeToScreen(screenID)
+	// Registered before the unsubscribe below, so it runs AFTER it (defers are LIFO)
+	// — subs is already decremented when we check whether this was the last browser.
+	defer func() {
+		if d.liveConnCount(screenID) == 0 {
+			d.scheduleReap(screenID)
+		}
+	}()
+	defer d.unsubscribeFromScreen(screenID, ch)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			conn.Close(websocket.StatusNormalClosure, "bye")
+			return
+		case <-evict:
+			// The screen was revoked/unbound — drop the socket; the panel re-shows
+			// the pair page (§B4). A distinct close code lets the kiosk tell "your
+			// screen was removed" from an ordinary disconnect.
+			conn.Close(websocket.StatusPolicyViolation, "screen revoked")
 			return
 		case <-ch:
 			if err := send(); err != nil {
@@ -262,12 +435,9 @@ func runDisplayServe(args []string) {
 
 	d := newDisplayServer()
 
-	// Pair the screen if it hasn't been claimed yet: show a code on the panel and
-	// poll until a phone claims it. Non-fatal — if pairing can't start we still
-	// serve (the screen just isn't a household entity yet).
-	if readConfigValue("display_claimed") != "1" {
-		provisionAndPairScreen(d)
-	}
+	// Screens pair themselves now (browser-as-screen, §B4): each browser that loads
+	// the kiosk claims itself via /screen/pair and holds its own credential, so the
+	// daemon no longer auto-pairs one fixed screen at startup.
 
 	// Standalone: own the relay client (dial + reconnect + attach as transport).
 	// The unified daemon attaches its OWN /ws/daemon connection instead — see
@@ -296,6 +466,11 @@ func (d *displayServer) serve(bind string) (func(), error) {
 	mux := http.NewServeMux()
 	mux.Handle("/", kioskHandler())
 	mux.HandleFunc("/ws/screen", d.handleScreenWS)
+	// Browser-driven screen pairing (§B4): an unclaimed browser asks this server for
+	// a screen and polls until a phone claims it. LAN HTTP (not the local control
+	// socket) because the browser may be on another host.
+	mux.HandleFunc("/screen/pair", d.handleScreenPair)
+	mux.HandleFunc("/screen/pair/poll", d.handleScreenPairPoll)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
 	srv := &http.Server{Addr: bind, Handler: mux}
 
@@ -312,7 +487,7 @@ func (d *displayServer) serve(bind string) (func(), error) {
 
 	// Heartbeat the current content to the relay so display.query answers from
 	// cache and a relay restart re-warms within one interval. Change-driven reports
-	// (via wakeAll) cover immediacy; this covers reconnect + TTL expiry.
+	// (via wakeScreen) cover immediacy; this covers reconnect + TTL expiry.
 	hbStop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(15 * time.Second)
@@ -365,9 +540,16 @@ func displayControlSockPath() string {
 	return filepath.Join(os.TempDir(), "hearth-display.sock")
 }
 
-// applyControl mutates the served content per a control command. Kept separate
-// from the socket transport so it can be unit-tested directly.
+// applyControl mutates THIS box's primary screen per a control command (the local
+// `hearth display show`/`clear` socket path). The relay route uses
+// applyControlForScreen with the target screen id.
 func (d *displayServer) applyControl(cmd controlCommand) error {
+	return d.applyControlForScreen("", cmd)
+}
+
+// applyControlForScreen mutates one screen's content per a control command. Kept
+// separate from the socket/relay transports so it's unit-tested directly.
+func (d *displayServer) applyControlForScreen(screenID string, cmd controlCommand) error {
 	switch cmd.Cmd {
 	case "show":
 		kind := cmd.Kind
@@ -399,10 +581,10 @@ func (d *displayServer) applyControl(cmd controlCommand) error {
 		if cmd.TTLSeconds > 0 {
 			a.ExpiresAt = time.Now().Add(time.Duration(cmd.TTLSeconds) * time.Second)
 		}
-		d.setPublished(a)
+		d.setPublishedForScreen(screenID, a)
 		return nil
 	case "clear":
-		d.setPublished(screenAssignment{}) // empty published → falls to ambient
+		d.setPublishedForScreen(screenID, screenAssignment{}) // empty published → falls to ambient
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q", cmd.Cmd)

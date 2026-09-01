@@ -54,43 +54,69 @@ func (d *displayServer) closeRelay() {
 // consumed a display command, false so other frames fall through untouched.
 func (d *displayServer) handleRelayFrame(data []byte) bool {
 	var msg struct {
-		Type       string `json:"type"`
-		Cmd        string `json:"cmd"`
-		Kind       string `json:"kind"`
-		URL        string `json:"url"`
-		Markdown   string `json:"markdown"`
-		TTLSeconds int    `json:"ttl_seconds"`
+		Type       string              `json:"type"`
+		ScreenID   string              `json:"screen_id"`
+		Cmd        string              `json:"cmd"`
+		Kind       string              `json:"kind"`
+		URL        string              `json:"url"`
+		Markdown   string              `json:"markdown"`
+		TTLSeconds int                 `json:"ttl_seconds"`
+		Screens    []displayScreenInfo `json:"screens"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return false
 	}
 	switch msg.Type {
 	case "display_publish", "display_clear":
-		_ = d.applyControl(controlCommand{Cmd: msg.Cmd, Kind: msg.Kind, URL: msg.URL, Markdown: msg.Markdown, TTLSeconds: msg.TTLSeconds})
+		// Route to the target screen the relay resolved (resolveDisplayScreen). An
+		// empty screen_id, or this box's own screen, collapses onto the primary
+		// screen (screenKey), so a single-screen box is unchanged.
+		_ = d.applyControlForScreen(msg.ScreenID, controlCommand{Cmd: msg.Cmd, Kind: msg.Kind, URL: msg.URL, Markdown: msg.Markdown, TTLSeconds: msg.TTLSeconds})
+		return true
+	case "display_screens":
+		// The relay's authoritative set of screens bound to this host (§B3): cache it
+		// for /ws/screen validation and evict any screen that just dropped (revoked).
+		d.applyDisplayScreens(msg.Screens)
 		return true
 	}
 	return false
 }
 
-// displayStateFrame is the display_state report the display server pushes to the
-// relay (docs/household-display-plan.md): what's on the screen right now, so
-// display.query can answer without a round trip. The payload lives under `data`
-// like every other daemon→relay frame — the relay's daemon dispatch hands
-// handleDisplayState the frame's `data` field, not its top level. Pure, so it's
-// unit-tested. (Putting kind/payload at the top level was a silent bug: the report
-// arrived but handleDisplayState unmarshalled an empty `data` and bailed.)
-func displayStateFrame(a screenAssignment) map[string]interface{} {
-	data := map[string]interface{}{"kind": a.Kind, "payload": a.Payload}
-	if !a.ExpiresAt.IsZero() {
-		data["expires_at"] = a.ExpiresAt.UTC().Format(time.RFC3339)
+// displayStateReport is the PER-SCREEN display_state report the display server pushes
+// to the relay (§B6): what's on each screen it serves, plus whether a browser is live
+// on it, so display.query and the app's per-screen health answer without a round trip.
+// Keyed by the relay-pushed `known` set (the screens actually bound to this host).
+// Payload lives under `data` like every daemon→relay frame — the relay hands
+// handleDisplayState the `data` field, not the top level. Pure, so it's unit-tested.
+func (d *displayServer) displayStateReport() map[string]interface{} {
+	d.mu.Lock()
+	ids := make([]string, 0, len(d.known))
+	for id := range d.known {
+		ids = append(ids, id)
 	}
-	return map[string]interface{}{"type": "display_state", "data": data}
+	d.mu.Unlock()
+
+	screens := make([]map[string]interface{}, 0, len(ids))
+	for _, id := range ids {
+		cur := d.currentForScreen(id)
+		entry := map[string]interface{}{
+			"screen_id": id,
+			"kind":      cur.Kind,
+			"payload":   cur.Payload,
+			"online":    d.liveConnCount(id) > 0,
+		}
+		if !cur.ExpiresAt.IsZero() {
+			entry["expires_at"] = cur.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		screens = append(screens, entry)
+	}
+	return map[string]interface{}{"type": "display_state", "data": map[string]interface{}{"screens": screens}}
 }
 
-// reportState pushes the current content to the relay over the daemon WS. No-op
+// reportState pushes the per-screen content to the relay over the daemon WS. No-op
 // until the relay link is up (the periodic reporter re-sends once connected, so a
 // relay restart re-warms its cache within a heartbeat). Called on every change
-// (via wakeAll) and on a timer.
+// (via wakeScreen) and on a timer.
 func (d *displayServer) reportState() {
 	d.mu.Lock()
 	tx := d.relayTx
@@ -98,7 +124,7 @@ func (d *displayServer) reportState() {
 	if tx == nil || !tx.IsConnected() {
 		return
 	}
-	b, _ := json.Marshal(displayStateFrame(d.current()))
+	b, _ := json.Marshal(d.displayStateReport())
 	tx.SendText(b)
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -14,14 +15,30 @@ import (
 // relay refuses `apply` from any agent principal, so this can never mint on its
 // own. The relay also validates every proposed item against the real household
 // catalog before persisting, so an item can only target an entity that exists.
+//
+// Items are read from a FILE (--items-file) or STDIN by preference, NOT inlined
+// as --items. That is load-bearing, not cosmetic: the items are a JSON array
+// full of double-quotes, and the interpose hook that gates an agent's exec does
+// not JSON-escape argv — a quote-bearing argument corrupts the hook's request,
+// the daemon can't parse it, and the exec is DENIED (exit 126) before any rule
+// or ask. Passing a path (no embedded quotes) sidesteps that entirely. --items
+// is kept for humans and back-compat, but the Facilitator prompt teaches
+// --items-file.
 func runProposeOnboarding(args []string) {
 	fs := flag.NewFlagSet("hearth propose-onboarding", flag.ExitOnError)
-	itemsJSON := fs.String("items", "", "JSON array of proposed items (required). Each item: {op, primitive, risk, why, fields{...}}.")
+	itemsJSON := fs.String("items", "", "JSON array of proposed items inline. Prefer --items-file or stdin — an inline array of quoted JSON can be mangled by the agent exec gate.")
+	itemsFile := fs.String("items-file", "", "Path to a file holding the JSON array of proposed items. Preferred over --items. Each item: {op, primitive, risk, why, fields{...}}.")
 	rationale := fs.String("rationale", "", "One-paragraph rationale for the bundle, shown to the person who reviews it.")
 	intentTargetID := fs.String("intent-target-id", "", "The entity being onboarded (e.g. the new agent's position id).")
 	fs.Parse(args)
 
-	payload, err := buildProposeOnboardingPayload(*itemsJSON, *rationale, *intentTargetID)
+	items, err := readProposeItems(*itemsFile, *itemsJSON, os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hearth propose-onboarding: %v\n", err)
+		os.Exit(1)
+	}
+
+	payload, err := buildProposeOnboardingPayload(items, *rationale, *intentTargetID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hearth propose-onboarding: %v\n", err)
 		os.Exit(1)
@@ -53,20 +70,49 @@ func runProposeOnboarding(args []string) {
 	fmt.Println("A person will review and apply them from the app — you can't apply them yourself.")
 }
 
-// buildProposeOnboardingPayload validates --items is a non-empty JSON array and
-// assembles the ws_request payload. proposer_kind and the proposing agent's id
-// are stamped SERVER-SIDE from the caller principal, never trusted from the
-// client — this verb only carries the reasoned items.
+// readProposeItems resolves the items JSON from, in order of preference:
+// --items-file (a path), then --items (inline), then stdin when it is piped
+// (not a terminal). Returns the raw JSON text; validation happens in
+// buildProposeOnboardingPayload. stdin is the belt-and-suspenders path so a
+// piped `... < items.json` also works; a bare invocation with a terminal stdin
+// errors rather than blocking.
+func readProposeItems(itemsFile, itemsInline string, stdin *os.File) (string, error) {
+	if itemsFile != "" {
+		b, err := os.ReadFile(itemsFile)
+		if err != nil {
+			return "", fmt.Errorf("--items-file: %v", err)
+		}
+		return string(b), nil
+	}
+	if itemsInline != "" {
+		return itemsInline, nil
+	}
+	// Fall back to stdin only when it is piped/redirected, never a live
+	// terminal (which would hang waiting for input).
+	if fi, err := stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+		b, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", fmt.Errorf("reading items from stdin: %v", err)
+		}
+		return string(b), nil
+	}
+	return "", fmt.Errorf("no items given; pass --items-file <path>, pipe the JSON on stdin, or use --items")
+}
+
+// buildProposeOnboardingPayload validates the items text is a non-empty JSON
+// array and assembles the ws_request payload. proposer_kind and the proposing
+// agent's id are stamped SERVER-SIDE from the caller principal, never trusted
+// from the client — this verb only carries the reasoned items.
 func buildProposeOnboardingPayload(itemsJSON, rationale, intentTargetID string) (map[string]interface{}, error) {
 	if itemsJSON == "" {
-		return nil, fmt.Errorf("--items is required (a JSON array of proposed items)")
+		return nil, fmt.Errorf("items are empty (a JSON array is required)")
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal([]byte(itemsJSON), &items); err != nil {
-		return nil, fmt.Errorf("--items must be a JSON array: %v", err)
+		return nil, fmt.Errorf("items must be a JSON array: %v", err)
 	}
 	if len(items) == 0 {
-		return nil, fmt.Errorf("--items is empty; propose at least one item")
+		return nil, fmt.Errorf("items array is empty; propose at least one item")
 	}
 	payload := map[string]interface{}{
 		"intent_kind": "entity",

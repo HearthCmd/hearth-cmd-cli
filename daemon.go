@@ -857,10 +857,9 @@ func runDaemonForeground() {
 func (d *Daemon) startDisplaySubsystem() {
 	ds := newDisplayServer()
 
-	// Pair the screen if it hasn't been claimed yet (same flow as standalone).
-	if readConfigValue("display_claimed") != "1" {
-		provisionAndPairScreen(ds)
-	}
+	// Screens pair themselves (browser-as-screen, §B4): each kiosk browser claims
+	// itself via /screen/pair and holds its own credential, so the daemon no longer
+	// auto-pairs one fixed screen here.
 
 	stop, err := ds.serve(displayBindAddr())
 	if err != nil {

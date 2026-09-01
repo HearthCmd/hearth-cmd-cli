@@ -2,8 +2,44 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
+
+func TestReadProposeItems(t *testing.T) {
+	const arr = `[{"op":"grant","primitive":"rule"}]`
+
+	// --items-file wins and reads the file.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "items.json")
+	if err := os.WriteFile(path, []byte(arr), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readProposeItems(path, `["inline"]`, os.Stdin); err != nil || got != arr {
+		t.Fatalf("items-file: got %q err %v, want file contents", got, err)
+	}
+
+	// A bad path errors rather than silently falling through.
+	if _, err := readProposeItems(filepath.Join(dir, "nope.json"), arr, os.Stdin); err == nil {
+		t.Fatal("want error for missing --items-file path")
+	}
+
+	// Inline is used when no file is given.
+	if got, err := readProposeItems("", arr, os.Stdin); err != nil || got != arr {
+		t.Fatalf("inline: got %q err %v", got, err)
+	}
+
+	// Piped stdin is read when neither file nor inline is given.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = w.WriteString(arr); w.Close() }()
+	if got, err := readProposeItems("", "", r); err != nil || got != arr {
+		t.Fatalf("stdin: got %q err %v", got, err)
+	}
+}
 
 func TestBuildProposeOnboardingPayload(t *testing.T) {
 	if _, err := buildProposeOnboardingPayload("", "", ""); err == nil {

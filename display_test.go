@@ -43,7 +43,7 @@ func TestEffectiveContent(t *testing.T) {
 // an expired publish falls back to ambient without an explicit clear.
 func TestDisplayServerPublishAndExpiry(t *testing.T) {
 	d := newDisplayServer()
-	d.ambient = screenAssignment{Kind: "url", Payload: "art"}
+	d.setAmbient(screenAssignment{Kind: "url", Payload: "art"})
 
 	if got := d.current(); got.Payload != "art" {
 		t.Fatalf("initial current = %q, want ambient 'art'", got.Payload)
@@ -64,7 +64,7 @@ func TestDisplayServerPublishAndExpiry(t *testing.T) {
 // ambient, a bad command errors and changes nothing.
 func TestApplyControl(t *testing.T) {
 	d := newDisplayServer()
-	d.ambient = screenAssignment{Kind: "url", Payload: "art"}
+	d.setAmbient(screenAssignment{Kind: "url", Payload: "art"})
 
 	if err := d.applyControl(controlCommand{Cmd: "show", URL: "recipe"}); err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestApplyControl(t *testing.T) {
 // clearing it returns to normal content.
 func TestCurrentShowsPairingCode(t *testing.T) {
 	d := newDisplayServer()
-	d.ambient = screenAssignment{Kind: "url", Payload: "art"}
+	d.setAmbient(screenAssignment{Kind: "url", Payload: "art"})
 
 	d.setPairing("654321")
 	if got := d.current(); got.Kind != "pairing" || got.Payload != "654321" {
@@ -136,7 +136,7 @@ func TestStartDisplayPairing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	code, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef")
+	code, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestStartDisplayPairing(t *testing.T) {
 // ignores everything else.
 func TestHandleRelayFrame(t *testing.T) {
 	d := newDisplayServer()
-	d.ambient = screenAssignment{Kind: "url", Payload: "art"}
+	d.setAmbient(screenAssignment{Kind: "url", Payload: "art"})
 
 	if !d.handleRelayFrame([]byte(`{"type":"display_publish","cmd":"show","url":"recipe","ttl_seconds":3600}`)) {
 		t.Fatal("display_publish should be consumed")
@@ -179,6 +179,49 @@ func TestHandleRelayFrame(t *testing.T) {
 	}
 	if d.handleRelayFrame([]byte(`not json`)) {
 		t.Fatal("garbage must not be consumed")
+	}
+}
+
+// One display server drives many screens independently: publishes routed to
+// different screen_ids land in separate state and don't bleed into each other,
+// and each screen's own /ws/screen view (currentForScreen) reflects only its own.
+// This is the B1 acceptance — multi-screen-per-host (docs/display-browser-screens-plan.md).
+func TestHandleRelayFrame_MultiScreen(t *testing.T) {
+	d := newDisplayServer()
+
+	if !d.handleRelayFrame([]byte(`{"type":"display_publish","screen_id":"kitchen","cmd":"show","url":"recipe"}`)) {
+		t.Fatal("kitchen publish should be consumed")
+	}
+	if !d.handleRelayFrame([]byte(`{"type":"display_publish","screen_id":"office","cmd":"show","url":"calendar"}`)) {
+		t.Fatal("office publish should be consumed")
+	}
+
+	if got := d.currentForScreen("kitchen"); got.Payload != "recipe" {
+		t.Fatalf("kitchen = %q, want recipe", got.Payload)
+	}
+	if got := d.currentForScreen("office"); got.Payload != "calendar" {
+		t.Fatalf("office = %q, want calendar (kitchen must not bleed in)", got.Payload)
+	}
+
+	// Clearing one screen leaves the other untouched.
+	if !d.handleRelayFrame([]byte(`{"type":"display_clear","screen_id":"kitchen","cmd":"clear"}`)) {
+		t.Fatal("kitchen clear should be consumed")
+	}
+	if got := d.currentForScreen("kitchen"); !got.empty() {
+		t.Fatalf("kitchen after clear = %+v, want empty", got)
+	}
+	if got := d.currentForScreen("office"); got.Payload != "calendar" {
+		t.Fatalf("office after kitchen clear = %q, want calendar unchanged", got.Payload)
+	}
+
+	// A frame carrying this box's own screen id collapses onto the primary screen
+	// (key ""), so the credential-less kiosk (current()) still sees it.
+	d.primaryID = "my-own-screen"
+	if !d.handleRelayFrame([]byte(`{"type":"display_publish","screen_id":"my-own-screen","cmd":"show","url":"pinned"}`)) {
+		t.Fatal("own-screen publish should be consumed")
+	}
+	if got := d.current(); got.Payload != "pinned" {
+		t.Fatalf("primary current = %q, want pinned (own screen_id must collapse to primary)", got.Payload)
 	}
 }
 
@@ -279,28 +322,42 @@ func TestHandleRelayFrame_Markdown(t *testing.T) {
 	}
 }
 
-// displayStateFrame nests kind/payload under `data` — the relay hands
-// handleDisplayState the frame's `data` field, so a top-level payload is silently
-// dropped (the bug this asserts against). expires_at is included only when set.
-func TestDisplayStateFrame(t *testing.T) {
-	f := displayStateFrame(screenAssignment{Kind: "markdown", Payload: "<h1>x</h1>"})
+// displayStateReport is per-screen (§B6): one entry per known screen carrying its
+// content, expiry, and whether a browser is live on it, all under `data.screens`.
+func TestDisplayStateReport(t *testing.T) {
+	d := newDisplayServer()
+	d.applyDisplayScreens([]displayScreenInfo{
+		{ScreenID: "kitchen", SecretHash: "h1"},
+		{ScreenID: "office", SecretHash: "h2"},
+	})
+	d.setPublishedForScreen("kitchen", screenAssignment{Kind: "markdown", Payload: "<h1>x</h1>"})
+	d.setPublishedForScreen("office", screenAssignment{Kind: "url", Payload: "u", ExpiresAt: time.Now().Add(time.Hour)})
+
+	f := d.displayStateReport()
 	if f["type"] != "display_state" {
 		t.Fatalf("frame type = %v, want display_state", f["type"])
 	}
-	data, ok := f["data"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("frame payload must be under `data`, got %v", f)
+	data, _ := f["data"].(map[string]interface{})
+	screens, ok := data["screens"].([]map[string]interface{})
+	if !ok || len(screens) != 2 {
+		t.Fatalf("data.screens = %v, want 2 entries", data["screens"])
 	}
-	if data["kind"] != "markdown" || data["payload"] != "<h1>x</h1>" {
-		t.Fatalf("data = %v, want kind=markdown payload=<h1>x</h1>", data)
+	byID := map[string]map[string]interface{}{}
+	for _, s := range screens {
+		byID[s["screen_id"].(string)] = s
 	}
-	if _, ok := data["expires_at"]; ok {
-		t.Fatal("no-expiry assignment should omit expires_at")
+	if byID["kitchen"]["kind"] != "markdown" || byID["kitchen"]["payload"] != "<h1>x</h1>" {
+		t.Fatalf("kitchen entry = %v", byID["kitchen"])
 	}
-	f2 := displayStateFrame(screenAssignment{Kind: "url", Payload: "u", ExpiresAt: time.Now().Add(time.Hour)})
-	d2, _ := f2["data"].(map[string]interface{})
-	if _, ok := d2["expires_at"]; !ok {
-		t.Fatal("assignment with a TTL should set expires_at under data")
+	if _, ok := byID["kitchen"]["expires_at"]; ok {
+		t.Fatal("no-expiry screen should omit expires_at")
+	}
+	if _, ok := byID["office"]["expires_at"]; !ok {
+		t.Fatal("a TTL'd screen should carry expires_at")
+	}
+	// No browser connected → online false for both.
+	if byID["kitchen"]["online"] != false {
+		t.Fatalf("kitchen online = %v, want false (no browser)", byID["kitchen"]["online"])
 	}
 }
 
@@ -317,6 +374,7 @@ func (f *fakeTransport) IsConnected() bool { return f.connected }
 // through the attached transport — the path the unified daemon drives.
 func TestReportStateViaTransport(t *testing.T) {
 	d := newDisplayServer()
+	d.applyDisplayScreens([]displayScreenInfo{{ScreenID: "s1", SecretHash: "h"}})
 	tx := &fakeTransport{connected: true}
 	d.attachTransport(tx)
 	if len(tx.sent) == 0 {
@@ -324,15 +382,23 @@ func TestReportStateViaTransport(t *testing.T) {
 	}
 
 	before := len(tx.sent)
-	d.setPublished(screenAssignment{Kind: "url", Payload: "x", ExpiresAt: time.Now().Add(time.Hour)})
+	d.setPublishedForScreen("s1", screenAssignment{Kind: "url", Payload: "x", ExpiresAt: time.Now().Add(time.Hour)})
 	if len(tx.sent) <= before {
 		t.Fatal("a content change should trigger a report")
 	}
-	var frame map[string]interface{}
+	var frame struct {
+		Type string `json:"type"`
+		Data struct {
+			Screens []struct {
+				ScreenID string `json:"screen_id"`
+				Payload  string `json:"payload"`
+			} `json:"screens"`
+		} `json:"data"`
+	}
 	_ = json.Unmarshal(tx.sent[len(tx.sent)-1], &frame)
-	data, _ := frame["data"].(map[string]interface{})
-	if frame["type"] != "display_state" || data["payload"] != "x" {
-		t.Fatalf("last report = %v, want display_state with data.payload x", frame)
+	if frame.Type != "display_state" || len(frame.Data.Screens) != 1 ||
+		frame.Data.Screens[0].ScreenID != "s1" || frame.Data.Screens[0].Payload != "x" {
+		t.Fatalf("last report = %+v, want display_state with screen s1 payload x", frame)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
 )
 
@@ -28,12 +27,13 @@ func randomSecret() string {
 // startDisplayPairing POSTs /pair/start authenticated as the host (Bearer
 // host_secret + ?host_id=…) so the pending pairing records serving_host_id.
 // Returns the short code for the homeowner to type into their phone.
-func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string) (string, error) {
-	payload := map[string]string{
+func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string, isTemp bool) (string, error) {
+	payload := map[string]interface{}{
 		"io_device_id": screenID,
 		"form_factor":  "display",
 		"device_name":  "Display",
 		"secret_hash":  secretHash,
+		"is_temp":      isTemp,
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", baseURL+"/pair/start?host_id="+url.QueryEscape(hostID), bytes.NewReader(body))
@@ -93,65 +93,8 @@ func pollDisplayPairing(baseURL, screenID, code string) (string, error) {
 	return r.Status, nil
 }
 
-// provisionAndPairScreen mints (or reuses) the screen's credentials, starts a
-// pairing, shows the code on the panel, and polls in the background until the
-// screen is claimed. Best-effort: any failure logs and leaves the server serving
-// unclaimed rather than blocking startup.
-func provisionAndPairScreen(d *displayServer) {
-	baseURL, err := serverBaseURL()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hearth display: %v (serving unclaimed)\n", err)
-		return
-	}
-	hostID := readConfigValue("host_id")
-	hostSecret := readConfigValue("host_secret")
-	if hostID == "" || hostSecret == "" {
-		fmt.Fprintln(os.Stderr, "hearth display: not enrolled; cannot pair the screen")
-		return
-	}
-
-	// Reuse the screen's credentials across restarts so we re-pair the SAME
-	// io_device rather than minting a new one each boot.
-	screenID := readConfigValue("display_io_device_id")
-	secret := readConfigValue("display_io_device_secret")
-	if screenID == "" || secret == "" {
-		screenID = generateUUID()
-		secret = randomSecret()
-		_ = writeConfigValue("display_io_device_id", screenID)
-		_ = writeConfigValue("display_io_device_secret", secret)
-	}
-	secretHash := sha256Hex([]byte(secret))
-
-	code, err := startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "hearth display: pairing start failed: %v (serving unclaimed)\n", err)
-		return
-	}
-	d.setPairing(code)
-	fmt.Fprintf(os.Stderr, "hearth display: pair this screen in the Hearth app with code %s\n", code)
-
-	go func() {
-		for {
-			time.Sleep(2 * time.Second)
-			status, err := pollDisplayPairing(baseURL, screenID, code)
-			if err != nil {
-				continue
-			}
-			switch status {
-			case "claimed":
-				_ = writeConfigValue("display_claimed", "1")
-				d.clearPairing()
-				fmt.Fprintln(os.Stderr, "hearth display: screen claimed")
-				return
-			case "not_found":
-				// The code expired (10-min TTL) before anyone claimed it — mint a
-				// fresh one and keep showing it on the panel.
-				if newCode, err := startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash); err == nil {
-					code = newCode
-					d.setPairing(code)
-					fmt.Fprintf(os.Stderr, "hearth display: pairing code refreshed: %s\n", code)
-				}
-			}
-		}
-	}()
-}
+// Screens pair themselves now (browser-as-screen, §B4): each kiosk browser claims
+// itself via the display server's /screen/pair endpoint and holds its own
+// credential (display_browser_pairing.go). The former daemon-side auto-pair of one
+// fixed screen at startup was retired with that change; startDisplayPairing /
+// pollDisplayPairing remain — the browser-pairing handlers drive them per browser.
