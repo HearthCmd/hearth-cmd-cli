@@ -176,6 +176,14 @@ type ipcResponse struct {
 	ServerURL     string           `json:"server_url,omitempty"`
 	AgentHomePath string           `json:"agent_home_path,omitempty"`
 
+	// Display subsystem state (role=display hosts only; all omitted otherwise).
+	// DisplayBind is the LAN address it tried; DisplayActive true = serving there;
+	// DisplayError, when set, is why it failed (e.g. the port was already taken) —
+	// surfaced by `hearth status` so a silent bind collision isn't invisible.
+	DisplayActive bool   `json:"display_active,omitempty"`
+	DisplayBind   string `json:"display_bind,omitempty"`
+	DisplayError  string `json:"display_error,omitempty"`
+
 	// harnesses_response: server-side harness names whose local binary the
 	// daemon can resolve on PATH. Populated by handleHarnesses.
 	Harnesses []string `json:"harnesses,omitempty"`
@@ -268,6 +276,11 @@ type Daemon struct {
 	// tears down its HTTP server + control socket on Shutdown.
 	display     *displayServer
 	displayStop func()
+	// displayBind / displayError record the display subsystem's outcome for
+	// `hearth status` (guarded by identityMu). displayError non-empty = it failed to
+	// bind (e.g. the port is already taken by another display host on this box).
+	displayBind  string
+	displayError string
 
 	// Identity cache populated by server pushes on /ws/daemon. Served to
 	// `hearth status` via the "identity" IPC request so the CLI doesn't
@@ -861,9 +874,22 @@ func (d *Daemon) startDisplaySubsystem() {
 	// itself via /screen/pair and holds its own credential, so the daemon no longer
 	// auto-pairs one fixed screen here.
 
-	stop, err := ds.serve(displayBindAddr())
+	bind := displayBindAddr()
+	d.identityMu.Lock()
+	d.displayBind = bind
+	d.identityMu.Unlock()
+
+	stop, err := ds.serve(bind)
 	if err != nil {
-		log.Printf("daemon: display subsystem failed to start: %v", err)
+		// Loud + surfaced (not a swallowed one-liner): a bind collision is the common
+		// cause — another display host on this same box already holds the port. The
+		// daemon keeps running as an agent host, but `hearth status` now shows this.
+		d.identityMu.Lock()
+		d.displayError = err.Error()
+		d.identityMu.Unlock()
+		log.Printf("daemon: DISPLAY SUBSYSTEM FAILED TO START on %s: %v", bind, err)
+		log.Printf("daemon: if another display server on this machine already uses that " +
+			"address, set a different `display_bind` in ~/.hearth/credentials (e.g. 0.0.0.0:8091) and restart")
 		return
 	}
 
@@ -874,7 +900,7 @@ func (d *Daemon) startDisplaySubsystem() {
 
 	d.display = ds
 	d.displayStop = stop
-	log.Printf("daemon: display subsystem active (role=display) on %s", displayBindAddr())
+	log.Printf("daemon: display subsystem active (role=display) on %s", bind)
 }
 
 // hostHasDisplayRole reports whether this host carries the display role. Roles are
@@ -2240,6 +2266,8 @@ func (d *Daemon) handleIdentity(conn net.Conn) {
 	humanUserID := d.humanUserID
 	orgs := append([]daemonOrgEntry(nil), d.orgs...)
 	agentHome := d.agentHomePath
+	displayBind := d.displayBind
+	displayError := d.displayError
 	d.identityMu.RUnlock()
 
 	hostname, _ := os.Hostname()
@@ -2262,6 +2290,9 @@ func (d *Daemon) handleIdentity(conn net.Conn) {
 		WSConnected:   wsConnected,
 		ServerURL:     wsURL,
 		AgentHomePath: agentHome,
+		DisplayBind:   displayBind,
+		DisplayError:  displayError,
+		DisplayActive: displayBind != "" && displayError == "",
 	})
 }
 

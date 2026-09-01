@@ -160,6 +160,15 @@ func printThisHostSection(out *os.File, ident *ipcResponse, instances []instance
 	if ident.AgentHomePath != "" {
 		fmt.Fprintf(out, "  agent home: %s\n", ident.AgentHomePath)
 	}
+	// Display subsystem (role=display hosts). A bind failure is called out loudly so
+	// a silent collision — another display host on this box holding the port — is
+	// visible here instead of only in the daemon log.
+	if ident.DisplayError != "" {
+		fmt.Fprintf(out, "  display: ! FAILED to serve on %s — %s\n", ident.DisplayBind, ident.DisplayError)
+		fmt.Fprintf(out, "           set a different `display_bind` in ~/.hearth/credentials and restart\n")
+	} else if ident.DisplayActive {
+		fmt.Fprintf(out, "  display: serving on %s\n", ident.DisplayBind)
+	}
 
 	if len(instances) == 0 {
 		fmt.Fprintln(out, "  active instances: (none)")

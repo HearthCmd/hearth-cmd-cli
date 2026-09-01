@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -32,6 +33,21 @@ func serverBaseURL() (string, error) {
 		scheme = "http"
 	}
 	return fmt.Sprintf("%s://%s", scheme, u.Host), nil
+}
+
+// appBaseURL derives the public web-app base URL from the relay URL by swapping the
+// "api." host prefix for "app." (api.hearthcmd.dev → https://app.hearthcmd.dev), which
+// is how the two subdomains are deployed. Returns "" when it can't (e.g. a localhost
+// relay) — callers then just omit the pairing QR and show the code alone.
+func appBaseURL() string {
+	if wsURL == "" {
+		return ""
+	}
+	u, err := url.Parse(wsURL)
+	if err != nil || !strings.HasPrefix(u.Host, "api.") {
+		return ""
+	}
+	return "https://app." + strings.TrimPrefix(u.Host, "api.")
 }
 
 // requestAuthCode asks the server to email a one-time code to the given

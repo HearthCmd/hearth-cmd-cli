@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -110,7 +111,14 @@ func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request)
 		writeScreenJSON(w, map[string]interface{}{"error": "pairing start failed"})
 		return
 	}
-	writeScreenJSON(w, map[string]interface{}{"code": code})
+	resp := map[string]interface{}{"code": code}
+	// A scan-to-claim deep link the kiosk renders as a QR: opens the app straight to
+	// claiming this code. Omitted when the app base can't be derived (e.g. localhost),
+	// in which case the kiosk just shows the code.
+	if appBase := appBaseURL(); appBase != "" {
+		resp["claim_url"] = appBase + "/pair?code=" + url.QueryEscape(code)
+	}
+	writeScreenJSON(w, resp)
 }
 
 // handleScreenPairPoll (GET /screen/pair/poll?screen_id=&code=) forwards the relay

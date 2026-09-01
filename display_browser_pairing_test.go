@@ -14,6 +14,24 @@ import (
 	"github.com/coder/websocket"
 )
 
+// appBaseURL swaps the relay's api. host for app.; returns "" when it can't derive one.
+func TestAppBaseURL(t *testing.T) {
+	old := wsURL
+	defer func() { wsURL = old }()
+	cases := map[string]string{
+		"wss://api.hearthcmd.dev/ws/relay": "https://app.hearthcmd.dev",
+		"wss://api.hearthcmd.com/ws/relay": "https://app.hearthcmd.com",
+		"ws://localhost:8080/ws/relay":     "", // no api. prefix → no QR
+		"":                                 "",
+	}
+	for in, want := range cases {
+		wsURL = in
+		if got := appBaseURL(); got != want {
+			t.Fatalf("appBaseURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseSubprotocols(t *testing.T) {
 	cases := []struct {
 		in   string
