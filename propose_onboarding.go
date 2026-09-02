@@ -30,6 +30,14 @@ func runProposeOnboarding(args []string) {
 	itemsFile := fs.String("items-file", "", "Path to a file holding the JSON array of proposed items. Preferred over --items. Each item: {op, primitive, risk, why, fields{...}}.")
 	rationale := fs.String("rationale", "", "One-paragraph rationale for the bundle, shown to the person who reviews it.")
 	intentTargetID := fs.String("intent-target-id", "", "The entity being onboarded (e.g. the new agent's position id).")
+	// SHIPPING THESE? The Facilitator is not yet told to use them. The prompt
+	// line lives in relay/cmd/hearth-cloud/provisioning_prompts.go
+	// (facilitatorHowTo) and was held back because this parses with
+	// flag.ExitOnError — on a daemon predating these flags, an unknown flag does
+	// not degrade, it exits(2) and takes the whole proposal down. Add the prompt
+	// line back in the release that puts this binary on hosts, not before.
+	sourceBlueprint := fs.String("source-blueprint", "", "The published blueprint this bundle was drawn from, e.g. verge_labs/dj. Provenance only — it records where the household's shape came from and binds nothing.")
+	sourceBlueprintVersion := fs.String("source-blueprint-version", "", "The version of that blueprint, when known.")
 	fs.Parse(args)
 
 	items, err := readProposeItems(*itemsFile, *itemsJSON, os.Stdin)
@@ -38,7 +46,7 @@ func runProposeOnboarding(args []string) {
 		os.Exit(1)
 	}
 
-	payload, err := buildProposeOnboardingPayload(items, *rationale, *intentTargetID)
+	payload, err := buildProposeOnboardingPayload(items, *rationale, *intentTargetID, *sourceBlueprint, *sourceBlueprintVersion)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hearth propose-onboarding: %v\n", err)
 		os.Exit(1)
@@ -103,7 +111,7 @@ func readProposeItems(itemsFile, itemsInline string, stdin *os.File) (string, er
 // array and assembles the ws_request payload. proposer_kind and the proposing
 // agent's id are stamped SERVER-SIDE from the caller principal, never trusted
 // from the client — this verb only carries the reasoned items.
-func buildProposeOnboardingPayload(itemsJSON, rationale, intentTargetID string) (map[string]interface{}, error) {
+func buildProposeOnboardingPayload(itemsJSON, rationale, intentTargetID, sourceBlueprint, sourceBlueprintVersion string) (map[string]interface{}, error) {
 	if itemsJSON == "" {
 		return nil, fmt.Errorf("items are empty (a JSON array is required)")
 	}
@@ -123,6 +131,16 @@ func buildProposeOnboardingPayload(itemsJSON, rationale, intentTargetID string) 
 	}
 	if intentTargetID != "" {
 		payload["intent_target_id"] = intentTargetID
+	}
+	// Provenance (docs/blueprints.md §9). Recorded rather than derived because it
+	// cannot be reconstructed later: once a household is built there is nothing
+	// in the graph that says which pattern it came from. A version with no slug
+	// would say nothing, so it only rides along with one.
+	if sourceBlueprint != "" {
+		payload["source_blueprint"] = sourceBlueprint
+		if sourceBlueprintVersion != "" {
+			payload["source_blueprint_version"] = sourceBlueprintVersion
+		}
 	}
 	return payload, nil
 }

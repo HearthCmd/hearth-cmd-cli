@@ -26,32 +26,7 @@ type wakeTargetPayload struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
 	} `json:"ai_agent_instance"`
-	SpawnContext struct {
-		HarnessName      string `json:"harness_name"`
-		HostID           string `json:"host_id"`
-		DirectoryPath    string `json:"directory_path"`
-		ModelProvider    string `json:"model_provider"`
-		ModelName        string `json:"model_name"`
-		AgentName        string `json:"agent_name"`
-		JobTitle         string `json:"job_title"`
-		JobMandate       string `json:"job_mandate"`
-		OrganizationName string `json:"organization_name"`
-		// LastSessionID is the harness-internal session id from the prior
-		// spawn (claude --session-id, copilot --resume, pi --session).
-		// Empty on first wake; populated thereafter from the daemon's
-		// post-spawn report. Daemon falls back to a fresh id if the
-		// prior on-disk transcript is gone.
-		LastSessionID string `json:"last_session_id"`
-		// SystemPrompt is the server-owned versioned hearth boilerplate; empty
-		// when the server didn't send one (old server / unseeded catalog /
-		// legacy NULL peg), in which case the daemon uses its compiled-in
-		// fallback. See the system_prompts catalog + spawn_context.
-		SystemPrompt string `json:"system_prompt"`
-		// Displays is a JSON array of the household screens this agent may publish
-		// to ([{id,name}]), server-computed (CP4). Empty when the household has no
-		// screens or the agent lacks display.publish. buildDisplayPrompt renders it.
-		Displays string `json:"displays"`
-	} `json:"spawn_context"`
+	SpawnContext agentSpawnContext `json:"spawn_context"`
 }
 
 // reconcileAndWakeAgents runs once after the daemon's WebSocket comes up.
@@ -199,20 +174,7 @@ func (d *Daemon) wakeOneAgent(t wakeTargetPayload) {
 		return
 	}
 
-	if _, err := d.spawnAgentInstance(
-		id,
-		t.AIAgentInstance.Name,
-		t.SpawnContext.HarnessName,
-		t.SpawnContext.DirectoryPath,
-		t.SpawnContext.ModelProvider,
-		t.SpawnContext.ModelName,
-		t.SpawnContext.JobTitle,
-		t.SpawnContext.JobMandate,
-		t.SpawnContext.OrganizationName,
-		t.SpawnContext.LastSessionID,
-		t.SpawnContext.SystemPrompt,
-		t.SpawnContext.Displays,
-	); err != nil {
+	if _, err := d.spawnAgentInstance(id, t.AIAgentInstance.Name, t.SpawnContext); err != nil {
 		log.Printf("daemon: wake %s: spawn failed: %v", id, err)
 		d.reportPIDStatus(id, "spawn_failed")
 	}

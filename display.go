@@ -40,6 +40,24 @@ type screenAssignment struct {
 
 func (a screenAssignment) empty() bool { return a.Kind == "" }
 
+// viewportInfo is the browser window's reported dimensions for a screen
+// (docs/display-viewport-plan.md): CSS pixels (w/h) plus devicePixelRatio. It's a
+// tuning hint for a publishing agent, not a canvas contract — a window resizes and
+// rotates. Reported by the kiosk over /ws/screen, cached here, and forwarded to the
+// relay in the per-screen display_state report.
+type viewportInfo struct {
+	W   int     `json:"w"`
+	H   int     `json:"h"`
+	DPR float64 `json:"dpr"`
+}
+
+// viewportBounds clamps untrusted kiosk-reported dimensions. w/h in reasonable
+// pixel range; dpr in a sane density range. An out-of-range value fails the parse
+// so the frame is dropped and the screen keeps its last-known (or unknown) size.
+func (v viewportInfo) valid() bool {
+	return v.W >= 1 && v.W <= 32768 && v.H >= 1 && v.H <= 32768 && v.DPR >= 0.1 && v.DPR <= 10
+}
+
 func (a screenAssignment) expired(now time.Time) bool {
 	return !a.ExpiresAt.IsZero() && now.After(a.ExpiresAt)
 }
@@ -72,7 +90,8 @@ type displayTransport interface {
 type screenState struct {
 	ambient     screenAssignment
 	published   screenAssignment
-	pairingCode string // non-empty while unclaimed: show this code on this screen
+	pairingCode string        // non-empty while unclaimed: show this code on this screen
+	viewport    *viewportInfo // last browser-reported window dims; nil = never reported
 	subs        map[chan struct{}]struct{}
 	// evicts are per-connection "your screen was revoked, close now" signals. Closed
 	// (never sent on) by evictScreen when this screen drops from a display_screens
@@ -215,6 +234,53 @@ func (d *displayServer) setPairingForScreen(id, code string) {
 
 func (d *displayServer) clearPairing() { d.setPairing("") }
 
+// setViewport records a screen's browser-reported window dimensions and reports the
+// (now-enriched) state to the relay so display.query answers with the size. No
+// wakeScreen — viewport doesn't change what the screen shows, only what the relay
+// knows about it.
+func (d *displayServer) setViewport(id string, vp viewportInfo) {
+	d.mu.Lock()
+	v := vp
+	d.stateLocked(d.screenKey(id)).viewport = &v
+	d.mu.Unlock()
+	d.reportState()
+}
+
+// viewportForScreen returns a screen's last-known viewport, or nil if a browser has
+// never reported one.
+func (d *displayServer) viewportForScreen(id string) *viewportInfo {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if st := d.screens[d.screenKey(id)]; st != nil && st.viewport != nil {
+		v := *st.viewport
+		return &v
+	}
+	return nil
+}
+
+// handleScreenInbound parses a frame the kiosk sent up the /ws/screen socket. Today
+// the only upstream frame is `viewport`; unknown types are ignored (forward-compat).
+// The dimensions are untrusted LAN-browser input, so they're clamped (valid()) before
+// storing — a bad frame is dropped, not fatal.
+func (d *displayServer) handleScreenInbound(screenID string, data []byte) {
+	var f struct {
+		Type string  `json:"type"`
+		W    int     `json:"w"`
+		H    int     `json:"h"`
+		DPR  float64 `json:"dpr"`
+	}
+	if json.Unmarshal(data, &f) != nil {
+		return
+	}
+	switch f.Type {
+	case "viewport":
+		vp := viewportInfo{W: f.W, H: f.H, DPR: f.DPR}
+		if vp.valid() {
+			d.setViewport(screenID, vp)
+		}
+	}
+}
+
 // wakeScreen signals the live /ws/screen connections for ONE screen to re-send
 // their current assignment, then reports state to the relay. Non-blocking and
 // coalesced (a pending wake covers a new one).
@@ -309,9 +375,23 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 	}
 	screenID = credScreenID
 
-	// CloseRead drains incoming frames (handling pings/close) and gives us a
-	// context cancelled when the browser goes away — this server only writes.
-	ctx := conn.CloseRead(r.Context())
+	// The kiosk now sends upstream too (a `viewport` frame — docs/display-viewport-plan.md),
+	// so we can't use conn.CloseRead (which drains + discards). One reader goroutine
+	// parses inbound frames and cancels ctx when the browser departs, preserving
+	// CloseRead's teardown semantics; the main loop below only writes. One reader + one
+	// writer is the correct coder/websocket pattern (concurrent read/write is allowed).
+	ctx, cancelRead := context.WithCancel(r.Context())
+	defer cancelRead()
+	go func() {
+		defer cancelRead() // read error = browser gone → tear the write loop down
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			d.handleScreenInbound(screenID, data)
+		}
+	}()
 
 	// A revoked screen force-closes here: evictScreen closes this channel when the
 	// screen drops from a display_screens push, so the loop below tears down.
@@ -714,6 +794,12 @@ func runDisplayQuery(args []string) {
 		Payload   string `json:"payload"`
 		ExpiresAt string `json:"expires_at"`
 		Expired   bool   `json:"expired"`
+		Viewport  *struct {
+			W           int     `json:"w"`
+			H           int     `json:"h"`
+			DPR         float64 `json:"dpr"`
+			Orientation string  `json:"orientation"`
+		} `json:"viewport"`
 	}
 	_ = json.Unmarshal(data, &resp)
 	if resp.Error != "" {
@@ -735,6 +821,13 @@ func runDisplayQuery(args []string) {
 			line += " (expires " + resp.ExpiresAt + ")"
 		}
 		fmt.Println(line)
+	}
+	// The screen's window size, when a kiosk has reported it — tune published content
+	// (font scale, layout density, image resolution, aspect) to it. Absent = unknown
+	// (no browser has connected yet); render responsively rather than assuming.
+	if resp.Viewport != nil {
+		fmt.Printf("  screen size: %d×%d px, %gx density (%s)\n",
+			resp.Viewport.W, resp.Viewport.H, resp.Viewport.DPR, resp.Viewport.Orientation)
 	}
 }
 

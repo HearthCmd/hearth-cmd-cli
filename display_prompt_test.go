@@ -18,7 +18,7 @@ func TestBuildDisplayPrompt_RendersScreensAndVerb(t *testing.T) {
 	if got == "" {
 		t.Fatal("expected a non-empty display prompt")
 	}
-	for _, want := range []string{"hearth display publish", "Kitchen Display", "Hallway", "Household displays"} {
+	for _, want := range []string{"hearth display publish", "hearth display query", "Kitchen Display", "Hallway", "Household displays"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("display prompt missing %q; got:\n%s", want, got)
 		}

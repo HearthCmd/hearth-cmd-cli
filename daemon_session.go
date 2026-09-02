@@ -140,6 +140,16 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 	// identityPrompt stamps name/role/mandate/org into the agent's system
 	// prompt; empty for talk-style sessions that have no JD context.
 	identityPrompt := buildIdentityPrompt(req.AgentName, req.JobTitle, req.JobMandate, req.OrganizationName)
+	// Who else works here, and how things are done in this house. Stamped beside
+	// identity rather than in the resource/competence slot: this is "where you
+	// are and who you are among", not "what you can do".
+	if hp := buildHouseholdPrompt(req.HouseholdContext); hp != "" {
+		if identityPrompt != "" {
+			identityPrompt = identityPrompt + "\n\n" + hp
+		} else {
+			identityPrompt = hp
+		}
+	}
 	// Pre-fetch entity caches per connection so the prompt builder
 	// stays pure (no DB handle in its signature). Nil/empty on hosts
 	// where localDB couldn't be opened — prompt still renders, just
@@ -265,6 +275,38 @@ func (d *Daemon) newAgentInstance(req ipcRequest) (*AgentInstance, error) {
 			}
 			if err := h.InstallSkill(hctx, skillKey, conn.PluginSlug, content); err != nil {
 				log.Printf("InstallSkill(%s, conn=%s): %v", agent, skillKey, err)
+			}
+		}
+
+		// Catalog skills: competence bound to this agent's POSITION, fetched by
+		// the relay and delivered whole in spawn_context (docs/blueprints.md §4).
+		//
+		// Reconcile FIRST, and by prefix rather than by iterating a known
+		// universe. The plugin loop above can ask "is this connection still
+		// granted?" because the daemon knows every connection; for catalog
+		// skills it knows only what the server just sent, so a skill dropped
+		// from a role simply stops arriving with nothing left to iterate.
+		// Without the prefix sweep, revoking a skill would never take it off
+		// the host.
+		catalogSkills := parseCatalogSkills(req.Skills)
+		keep := make([]string, 0, len(catalogSkills))
+		for _, sk := range catalogSkills {
+			keep = append(keep, catalogSkillScope(sk.Slug))
+		}
+		if err := h.RemoveSkillsExcept(hctx, catalogSkillSource, catalogSkillScopePrefix, keep); err != nil {
+			log.Printf("RemoveSkillsExcept(%s): %v", agent, err)
+		}
+		for _, sk := range catalogSkills {
+			if err := h.InstallSkill(hctx, catalogSkillScope(sk.Slug), catalogSkillSource, []byte(sk.Content)); err != nil {
+				log.Printf("InstallSkill(%s, skill=%s): %v", agent, sk.Slug, err)
+			}
+			if sk.PinnedVersion != "" {
+				// Recorded, not enforced (docs/blueprints.md §4): the household
+				// asked for one version and the catalog publishes another. Worth
+				// saying out loud so it is discoverable in a daemon log rather
+				// than only in a database column.
+				log.Printf("skills: %s installed at %s (household asked for %s)",
+					sk.Slug, sk.Version, sk.PinnedVersion)
 			}
 		}
 	}

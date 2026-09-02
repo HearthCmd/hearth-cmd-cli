@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -95,22 +96,22 @@ func (claudeHarness) TranscriptPath(ctx HarnessCtx) string {
 }
 
 // Claude's TextInput flushes \r cleanly — no extra delay or kick needed.
-func (claudeHarness) SubmitDelay() time.Duration         { return 50 * time.Millisecond }
-func (claudeHarness) PostSubmit(_ *os.Process) error     { return nil }
+func (claudeHarness) SubmitDelay() time.Duration     { return 50 * time.Millisecond }
+func (claudeHarness) PostSubmit(_ *os.Process) error { return nil }
 
 // PreSpawn: flip three claude pre-acceptance flags so the first
 // injected user message doesn't get eaten by an interactive dialog:
 //
-//   1. preAcceptClaudeTrust — per-cwd "Do you trust this folder?"
-//      flag in ~/.claude.json
-//   2. preAcceptClaudeBypassPrompt — global "Bypass Permissions mode
-//      acceptance" in ~/.claude/settings.json (added in claude 2.1.147;
-//      without it claude sits at a Y/N dialog and exits non-zero)
-//   3. seedClaudeBypassSettings — project-local
-//      .claude/settings.local.json with permissions.defaultMode =
-//      bypassPermissions so the bash sandbox actually lets the agent
-//      write outside cwd, which --dangerously-skip-permissions on the
-//      CLI alone doesn't achieve
+//  1. preAcceptClaudeTrust — per-cwd "Do you trust this folder?"
+//     flag in ~/.claude.json
+//  2. preAcceptClaudeBypassPrompt — global "Bypass Permissions mode
+//     acceptance" in ~/.claude/settings.json (added in claude 2.1.147;
+//     without it claude sits at a Y/N dialog and exits non-zero)
+//  3. seedClaudeBypassSettings — project-local
+//     .claude/settings.local.json with permissions.defaultMode =
+//     bypassPermissions so the bash sandbox actually lets the agent
+//     write outside cwd, which --dangerously-skip-permissions on the
+//     CLI alone doesn't achieve
 //
 // All three are idempotent and best-effort; errors are logged inside.
 func (claudeHarness) PreSpawn(ctx HarnessCtx) error {
@@ -131,8 +132,8 @@ func (claudeHarness) PreSpawn(ctx HarnessCtx) error {
 // a fixed skill must reach an agent that already holds the old one — the whole
 // point of re-running this on every (re)spawn) and no-op when it already
 // matches to avoid needless churn.
-func (claudeHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {
-	dir := filepath.Join(ctx.Cwd, ".claude", "skills", pluginSlug+"-"+connectionID)
+func (claudeHarness) InstallSkill(ctx HarnessCtx, scope, source string, skillContent []byte) error {
+	dir := filepath.Join(ctx.Cwd, ".claude", "skills", source+"-"+scope)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -145,20 +146,20 @@ func (claudeHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug strin
 
 // RemoveSkill removes <cwd>/.claude/skills/<pluginSlug>-<connectionID>/
 // so the agent no longer sees the skill on next launch.
-func (claudeHarness) RemoveSkill(ctx HarnessCtx, connectionID, pluginSlug string) error {
-	dir := filepath.Join(ctx.Cwd, ".claude", "skills", pluginSlug+"-"+connectionID)
+func (claudeHarness) RemoveSkill(ctx HarnessCtx, scope, source string) error {
+	dir := filepath.Join(ctx.Cwd, ".claude", "skills", source+"-"+scope)
 	if err := os.RemoveAll(dir); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
 }
 
-func (claudeHarness) SessionIDPolicy() SessionIDPolicy { return SessionIDMint }
-func (claudeHarness) ReportsResumeID() bool            { return true }
+func (claudeHarness) SessionIDPolicy() SessionIDPolicy  { return SessionIDMint }
+func (claudeHarness) ReportsResumeID() bool             { return true }
 func (claudeHarness) AssignedSessionID(_ string) string { return "" }
-func (claudeHarness) NeedsInjectGate() bool            { return false }
-func (claudeHarness) SupportsAttach() bool             { return true }
-func (claudeHarness) WarmupPayload() []byte            { return nil }
+func (claudeHarness) NeedsInjectGate() bool             { return false }
+func (claudeHarness) SupportsAttach() bool              { return true }
+func (claudeHarness) WarmupPayload() []byte             { return nil }
 
 // Claude has no helper binaries to entitle.
 func (claudeHarness) EnsureHelperEntitlements() {}
@@ -195,4 +196,30 @@ func probeClaudeVersion() (string, error) {
 func init() {
 	registerHarness(claudeHarness{})
 	registerVersionProbe("claude", probeClaudeVersion)
+}
+
+// RemoveSkillsExcept prunes <cwd>/.claude/skills/. That directory is entirely
+// hearth-managed — we write it and we delete it — so listing it is a legitimate
+// way to learn what is installed, and the only way to notice a catalog skill
+// that was revoked while the agent slept.
+func (claudeHarness) RemoveSkillsExcept(ctx HarnessCtx, source, scopePrefix string, keep []string) error {
+	root := filepath.Join(ctx.Cwd, ".claude", "skills")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil // nothing installed yet
+	}
+	keepSet := map[string]bool{}
+	for _, k := range keep {
+		keepSet[source+"-"+k] = true
+	}
+	prefix := source + "-" + scopePrefix
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) || keepSet[e.Name()] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }

@@ -86,7 +86,7 @@ func (copilotHarness) TranscriptPath(ctx HarnessCtx) string {
 	return deriveCopilotTranscriptPath()
 }
 
-func (copilotHarness) SubmitDelay() time.Duration   { return 50 * time.Millisecond }
+func (copilotHarness) SubmitDelay() time.Duration     { return 50 * time.Millisecond }
 func (copilotHarness) PostSubmit(_ *os.Process) error { return nil }
 
 // PreSpawn: trust-pre-accept cwd in ~/.copilot/config.json's
@@ -100,17 +100,17 @@ func (copilotHarness) PreSpawn(ctx HarnessCtx) error {
 	return installHearthInstructions("copilot", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd, ctx.HearthPromptBody)
 }
 
-func (copilotHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {
+func (copilotHarness) InstallSkill(ctx HarnessCtx, scope, source string, skillContent []byte) error {
 	return appendSkillToInstructionFile(
 		filepath.Join(ctx.Cwd, ".github", "copilot-instructions.md"),
-		connectionID, pluginSlug, skillContent,
+		scope, source, skillContent,
 	)
 }
 
-func (copilotHarness) RemoveSkill(ctx HarnessCtx, connectionID, _ string) error {
+func (copilotHarness) RemoveSkill(ctx HarnessCtx, scope, _ string) error {
 	return stripSkillFromInstructionFile(
 		filepath.Join(ctx.Cwd, ".github", "copilot-instructions.md"),
-		connectionID,
+		scope,
 	)
 }
 
@@ -162,4 +162,9 @@ func init() {
 // carry this harness. Port an exact end-of-turn marker here if one turns up.
 func (copilotHarness) ObserveTranscript(line []byte) TranscriptObservation {
 	return baseObserveTranscript(line)
+}
+
+func (copilotHarness) RemoveSkillsExcept(ctx HarnessCtx, _, scopePrefix string, keep []string) error {
+	return stripSkillsExceptFromInstructionFile(
+		filepath.Join(ctx.Cwd, ".github", "copilot-instructions.md"), scopePrefix, keep)
 }

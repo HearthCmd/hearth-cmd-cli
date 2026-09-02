@@ -96,6 +96,15 @@ func (d *inboxDeliverer) run() {
 		default:
 		}
 
+		// Take the wake channel BEFORE peeking. wake() works by closing the
+		// current channel and installing a fresh one, so an Enqueue landing
+		// between the peek and the select below would otherwise close a channel
+		// nobody is holding yet — and the select would then block on the
+		// replacement, waiting for a wake that has already happened. Holding it
+		// across the peek makes the wakeup level-triggered in effect: a close
+		// that arrives early is still observed.
+		notify := d.inbox.Notify()
+
 		entry, err := d.inbox.Peek()
 		if err != nil {
 			log.Printf("WARN daemon-inbox: peek failed for %s: %v", d.instanceID, err)
@@ -107,7 +116,7 @@ func (d *inboxDeliverer) run() {
 		if entry == nil {
 			// Idle: block until something is enqueued.
 			select {
-			case <-d.inbox.Notify():
+			case <-notify:
 			case <-d.stop:
 				return
 			}
@@ -232,7 +241,14 @@ func (d *inboxDeliverer) attempt(e *inboxEntry) {
 		// already running instead of making them a turn. This is the exact
 		// failure the inbox exists for; the next availability edge retries.
 		if final {
-			e.Reason = "harness absorbed it into a running turn on every attempt"
+			// A system event gets one attempt on purpose, so "on every attempt"
+			// would overstate it — and this is an expected outcome for
+			// observability, not a fault worth reading as one.
+			if isSystemEventSource(e.Source) {
+				e.Reason = "observability, absorbed mid-turn; not retried"
+			} else {
+				e.Reason = "harness absorbed it into a running turn on every attempt"
+			}
 			d.resolve(e, inboxOutcomeQuarantined)
 			return
 		}

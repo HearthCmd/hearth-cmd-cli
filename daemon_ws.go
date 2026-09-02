@@ -722,7 +722,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	// person's message.
 	source, ttl := "relay_input", inboxTTLChat
 	if isSystemEventEnvelope(text) {
-		source, ttl = "system_event", inboxTTLSystemEvent
+		source, ttl = inboxSourceSystemEvent, inboxTTLSystemEvent
 	}
 	d.deliverTurn(msg.AIAgentInstanceID, text, source, ttl)
 	return true
@@ -947,7 +947,6 @@ func (d *DaemonWS) deliverTurn(id string, prompt []byte, source string, ttl time
 	log.Printf("daemon-ws: queued %d-byte %s turn for %s (key=%s)", len(prompt), source, id, key)
 	return true
 }
-
 
 func buildChatMentionPrompt(roomID, senderName, text string, contextLines []string) []byte {
 	// Wrap in a hearth/1 envelope so the phone's transcript renderer can

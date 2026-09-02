@@ -209,34 +209,53 @@ type Harness interface {
 	// the same way.
 	ReportsResumeID() bool
 
-	// InstallSkill makes a resource plugin's skill content available to
-	// the agent in the harness-native way. Called once per active
-	// resource binding at spawn time, after PreSpawn. skillContent is
-	// the raw bytes of the plugin's skill.md (Claude YAML frontmatter +
-	// markdown body). connectionID and pluginSlug scope the installed
-	// artifact so multiple bindings don't collide.
+	// InstallSkill makes one unit of competence available to the agent in
+	// the harness-native way. Called at spawn time, after PreSpawn.
+	// skillContent is the raw markdown (Claude YAML frontmatter + body).
 	//
-	// Claude writes to <cwd>/.claude/skills/<pluginSlug>-<connectionID>/SKILL.md
-	// so Claude Code's native progressive-loading picks it up.
-	// Codex/Gemini/Copilot append the skill body inline to their
-	// existing instruction file (AGENTS.md / GEMINI.md /
-	// copilot-instructions.md). Harnesses with no suitable injection
-	// point return nil without doing anything.
+	// The two strings are an opaque (scope, source) pair identifying the
+	// installed artifact, NOT plugin-specific ids — there are two sources
+	// of skills now and only one installer:
+	//
+	//   resource plugin   scope = the connection's slug, source = plugin slug
+	//   published catalog scope = "catalog__<sanitised slug>", source = "skill"
+	//
+	// `scope` must be unique per installed skill: the inline harnesses key
+	// their marker on it alone. `source` is the human-readable half.
+	//
+	// Claude writes <cwd>/.claude/skills/<source>-<scope>/SKILL.md so Claude
+	// Code's native progressive-loading picks it up. Codex/Gemini/Copilot
+	// append the body inline to their instruction file (AGENTS.md /
+	// GEMINI.md / copilot-instructions.md). Harnesses with no suitable
+	// injection point return nil without doing anything.
 	//
 	// Errors are logged by the caller, never fatal — same contract as
 	// PreSpawn.
-	InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error
+	InstallSkill(ctx HarnessCtx, scope, source string, skillContent []byte) error
 
-	// RemoveSkill undoes InstallSkill for the given connection, called
-	// at spawn time for connections that are no longer granted to the
-	// agent (reconcile pass). Mirrors the installation path:
-	//
-	// Claude removes <cwd>/.claude/skills/<pluginSlug>-<connectionID>/.
-	// Codex/Gemini/Copilot strip the <!-- hearth-skill:<connectionID> -->
-	// block from the instruction file. Idempotent — no-op if not installed.
+	// RemoveSkill undoes InstallSkill for one (scope, source), called at
+	// spawn time for skills no longer bound to the agent. Mirrors the
+	// installation path and is idempotent — a no-op if not installed.
 	//
 	// Errors are logged by the caller, never fatal.
-	RemoveSkill(ctx HarnessCtx, connectionID, pluginSlug string) error
+	RemoveSkill(ctx HarnessCtx, scope, source string) error
+
+	// RemoveSkillsExcept strips every installed skill whose scope begins with
+	// scopePrefix and is not in keep.
+	//
+	// It exists because the two skill sources differ in what the daemon can
+	// enumerate. For plugins it knows the whole universe of connections, so it
+	// can reconcile by asking "is this one still granted?". For catalog skills
+	// it knows only what the server just SENT — a skill dropped from a role's
+	// bindings simply stops appearing, with nothing left to iterate. Without
+	// this, revoking a skill would never actually take it off the host.
+	//
+	// source is needed because the harnesses key differently: Claude's
+	// directory is "<source>-<scope>", while the inline harnesses' marker is
+	// the scope alone.
+	//
+	// Errors are logged by the caller, never fatal.
+	RemoveSkillsExcept(ctx HarnessCtx, source, scopePrefix string, keep []string) error
 
 	// ObserveTranscript classifies one bridge-shape transcript line for the
 	// daemon's readiness tracker and the inbox's confirmation oracle: did a

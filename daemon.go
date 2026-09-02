@@ -153,6 +153,17 @@ type ipcRequest struct {
 	// ([{id,name}]), from spawn_context.displays (CP4). buildDisplayPrompt renders
 	// a competence section from it so the agent knows `hearth display publish`.
 	Displays string `json:"-"`
+	// HouseholdContext is who else works here plus the household's handbook,
+	// composed server-side from spawn_context.household_context
+	// (docs/introductions.md §3). Stamped beside the identity prompt: an agent
+	// that knows its own role but not its colleagues behaves like a sole
+	// proprietor, and one that has never been told the house's conventions
+	// cannot follow them.
+	HouseholdContext string `json:"-"`
+	// Skills is a JSON array of resolved catalog skills with their content, from
+	// spawn_context.skills (docs/blueprints.md §4). The relay fetches; the daemon
+	// only places them.
+	Skills string `json:"-"`
 }
 
 // ipcResponse is the JSON control message sent by the daemon to the client.
@@ -368,6 +379,10 @@ type daemonOrgEntry struct {
 	Role      string `json:"role"`
 	JoinedAt  string `json:"joined_at"`
 	IsCurrent bool   `json:"is_current"`
+	// IsPro/ProSource mirror the server fields but are currently unread — the
+	// SUBSCRIPTION section was removed from `hearth status` because everything
+	// is free (entitlement enforcement is disconnected). Retained for a future
+	// re-enable. See docs/entitlements-disconnected.md.
 	IsPro     bool   `json:"is_pro"`
 	ProSource string `json:"pro_source,omitempty"`
 }

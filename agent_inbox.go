@@ -34,7 +34,45 @@ const (
 	// inboxDefaultMaxAttempts is how many times one entry may be injected
 	// without the transcript confirming it landed before it is quarantined.
 	inboxDefaultMaxAttempts = 5
+
+	// inboxSystemEventMaxAttempts is ONE, deliberately.
+	//
+	// A system event is observability the agent is explicitly instructed to
+	// ignore (see relay system_event.go), and retrying one is worse than
+	// dropping it — measurably so. Every injection that lands becomes a TURN
+	// the agent spends replying `<hearth-silent/>`, and every turn is a window
+	// in which a real message from a person gets absorbed mid-turn instead of
+	// landing.
+	//
+	// Observed in prod 2026-09-02: one proposal produced ten permission_resolved
+	// events; between the turns they cost and the retries they spent, FIVE
+	// messages from the household's own phone were swallowed. The noise was
+	// generating the busyness that lost the signal.
+	//
+	// Devices already receive permission_resolved directly over their WS
+	// (permission_fanout.go calls that "the durable mechanism"), so what a
+	// dropped one costs is a line in the stored transcript — not a household
+	// being uninformed.
+	inboxSystemEventMaxAttempts = 1
 )
+
+// inboxSourceSystemEvent marks server-emitted observability. Set in
+// daemon_ws.go when the payload is a system-event envelope.
+const inboxSourceSystemEvent = "system_event"
+
+// maxAttemptsForSource is the per-source retry budget.
+func maxAttemptsForSource(source string) int {
+	if source == inboxSourceSystemEvent {
+		return inboxSystemEventMaxAttempts
+	}
+	return inboxDefaultMaxAttempts
+}
+
+// isSystemEventSource reports whether an entry is observability rather than
+// something a person or a trigger is waiting on. Used for queue priority: a
+// person's message must never wait behind a notice the agent was told to
+// ignore.
+func isSystemEventSource(source string) bool { return source == inboxSourceSystemEvent }
 
 // Per-producer TTLs. A message delivered long after it was meant is sometimes
 // worse than one never delivered — a `permission_resolved` notice arriving
@@ -51,11 +89,11 @@ const (
 // queued (scheduled triggers, today) branch on these, so they are constants
 // rather than log strings.
 const (
-	inboxOutcomeConfirmed     = "confirmed"      // the transcript proved it became a turn
-	inboxOutcomeLandedLate    = "landed-late"    // same, observed after we stopped waiting
-	inboxOutcomeExpired       = "expired"        // TTL elapsed before the agent was ready
-	inboxOutcomeUnconfirmable = "unconfirmable"  // no probe to watch; injected best-effort
-	inboxOutcomeQuarantined   = "quarantined"    // gave up after max attempts
+	inboxOutcomeConfirmed     = "confirmed"     // the transcript proved it became a turn
+	inboxOutcomeLandedLate    = "landed-late"   // same, observed after we stopped waiting
+	inboxOutcomeExpired       = "expired"       // TTL elapsed before the agent was ready
+	inboxOutcomeUnconfirmable = "unconfirmable" // no probe to watch; injected best-effort
+	inboxOutcomeQuarantined   = "quarantined"   // gave up after max attempts
 )
 
 // inboxEntry is one queued turn.
@@ -172,7 +210,7 @@ func (q *agentInbox) Enqueue(key string, payload []byte, probe, source string, t
 		     enqueued_at, expires_at, attempts, max_attempts, state)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'pending')`,
 		key, q.instanceID, payload, probe, source,
-		now.Unix(), now.Add(ttl).Unix(), inboxDefaultMaxAttempts,
+		now.Unix(), now.Add(ttl).Unix(), maxAttemptsForSource(source),
 	)
 	if err != nil {
 		return fmt.Errorf("inbox enqueue: %w", err)
@@ -192,13 +230,22 @@ func (q *agentInbox) Peek() (*inboxEntry, error) {
 	if !q.usable() {
 		return nil, nil
 	}
+	// Real messages first, then FIFO within each class.
+	//
+	// A person's message must never wait behind observability the agent was
+	// told to ignore. Before this, a chat message queued behind three
+	// permission_resolved notices was delivered after them — and each of those
+	// deliveries was a turn during which the chat message could be absorbed.
+	//
+	// FIFO is preserved WITHIN a class, which is what actually matters: two
+	// messages from the same person still arrive in the order they were sent.
 	row := q.db.db.QueryRow(`
 		SELECT rowid, key, payload, probe, source, enqueued_at, expires_at,
 		       attempts, max_attempts, state, quarantine_reason
 		  FROM agent_inbox
 		 WHERE ai_agent_instance_id = ? AND state = 'pending'
-		 ORDER BY rowid
-		 LIMIT 1`, q.instanceID)
+		 ORDER BY (source = ?) ASC, rowid ASC
+		 LIMIT 1`, q.instanceID, inboxSourceSystemEvent)
 	e, err := scanInboxEntry(row, q.instanceID)
 	if err == sql.ErrNoRows {
 		return nil, nil

@@ -122,12 +122,12 @@ func (geminiHarness) PreSpawn(ctx HarnessCtx) error {
 	return installHearthInstructions("gemini", ctx.AIAgentInstanceID, ctx.IdentityPrompt, ctx.Cwd, ctx.HearthPromptBody)
 }
 
-func (geminiHarness) InstallSkill(ctx HarnessCtx, connectionID, pluginSlug string, skillContent []byte) error {
-	return appendSkillToInstructionFile(filepath.Join(ctx.Cwd, "GEMINI.md"), connectionID, pluginSlug, skillContent)
+func (geminiHarness) InstallSkill(ctx HarnessCtx, scope, source string, skillContent []byte) error {
+	return appendSkillToInstructionFile(filepath.Join(ctx.Cwd, "GEMINI.md"), scope, source, skillContent)
 }
 
-func (geminiHarness) RemoveSkill(ctx HarnessCtx, connectionID, _ string) error {
-	return stripSkillFromInstructionFile(filepath.Join(ctx.Cwd, "GEMINI.md"), connectionID)
+func (geminiHarness) RemoveSkill(ctx HarnessCtx, scope, _ string) error {
+	return stripSkillFromInstructionFile(filepath.Join(ctx.Cwd, "GEMINI.md"), scope)
 }
 
 // Gemini picks its own UUID per session (stored in the JSONL header,
@@ -191,4 +191,8 @@ func init() {
 // carry this harness. Port an exact end-of-turn marker here if one turns up.
 func (geminiHarness) ObserveTranscript(line []byte) TranscriptObservation {
 	return baseObserveTranscript(line)
+}
+
+func (geminiHarness) RemoveSkillsExcept(ctx HarnessCtx, _, scopePrefix string, keep []string) error {
+	return stripSkillsExceptFromInstructionFile(filepath.Join(ctx.Cwd, "GEMINI.md"), scopePrefix, keep)
 }

@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -614,3 +615,70 @@ func derivePiTranscriptPath(cwd string) string {
 	return ""
 }
 
+// buildHouseholdPrompt renders the server-composed household context — who else
+// works here, and the household's handbook (docs/introductions.md §3).
+//
+// A pass-through with a guard, deliberately. The relay composes the whole block
+// (renderHouseholdContext), so growing the handbook into sections or
+// per-audience slices later changes only the server — nothing here, and nothing
+// that has to ride the CLI release train.
+//
+// Why an agent needs it at all: buildIdentityPrompt tells an agent who IT is.
+// Nothing told it who anyone else is. A colleague that has never been told there
+// ARE colleagues behaves like a sole proprietor forever, and one that was never
+// told the house's conventions cannot follow them.
+func buildHouseholdPrompt(householdContext string) string {
+	return strings.TrimSpace(householdContext)
+}
+
+// catalogSkillScopePrefix marks a skill that came from the published catalog
+// rather than from a resource plugin. It is a prefix so the reconcile pass can
+// enumerate exactly the catalog-installed skills and leave plugin ones alone.
+const catalogSkillScopePrefix = "catalog__"
+
+// catalogSkillSource is the fixed `source` half of a catalog skill's key. Fixed
+// rather than derived so the installed artifact's name is predictable — which is
+// what lets RemoveSkillsExcept find it by prefix.
+const catalogSkillSource = "skill"
+
+// catalogSkill is one resolved skill as the relay sends it in
+// spawn_context.skills. The relay fetches the content (docs/blueprints.md §4);
+// the daemon only places it.
+type catalogSkill struct {
+	Slug    string `json:"slug"`
+	Version string `json:"version"`
+	// PinnedVersion is set only when the household asked for a version other
+	// than the one installed. An audit trail, not enforcement.
+	PinnedVersion string `json:"pinned_version,omitempty"`
+	Content       string `json:"content"`
+}
+
+// catalogSkillScope turns a slug into the scope half of an install key.
+// Slashes AND dashes become underscores: the scope must contain no dash,
+// because Claude's directory name is "<source>-<scope>" and the reconcile pass
+// splits on that dash to recover it.
+func catalogSkillScope(slug string) string {
+	repl := strings.NewReplacer("/", "_", "-", "_", " ", "_")
+	return catalogSkillScopePrefix + repl.Replace(slug)
+}
+
+// parseCatalogSkills reads spawn_context.skills. A malformed or absent value
+// yields none rather than an error: an agent with no skills works, it just
+// knows less, and no skill is worth failing a spawn over.
+func parseCatalogSkills(raw string) []catalogSkill {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []catalogSkill
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		log.Printf("daemon: ignoring malformed spawn_context.skills: %v", err)
+		return nil
+	}
+	kept := out[:0]
+	for _, s := range out {
+		if s.Slug != "" && strings.TrimSpace(s.Content) != "" {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}

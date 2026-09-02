@@ -256,3 +256,124 @@ func TestInbox_NilIsInert(t *testing.T) {
 		t.Fatal("enqueue into a nil inbox must report failure, not silently swallow the message")
 	}
 }
+
+// A wake that fires BEFORE the loop selects must still be observed.
+//
+// wake() closes the current notify channel and installs a fresh one, so which
+// channel a waiter is holding decides whether it sees the close. The delivery
+// loop therefore takes Notify() *before* it peeks: an Enqueue landing in the
+// window between the peek and the select closes the channel the loop already
+// holds, rather than one it is about to throw away.
+//
+// Getting this backwards is a lost wakeup — the loop blocks on the replacement
+// waiting for a wake that has already happened, and a queued message sits
+// undelivered until something unrelated wakes the loop. It surfaced as
+// TestDelivery_ExpiredEntryIsDroppedWithoutInjecting, the one delivery test
+// with no activity after its enqueue and so nothing else to rescue it.
+func TestInboxNotify_WakeBeforeSelectIsNotLost(t *testing.T) {
+	q, _ := newTestInbox(t)
+
+	// The loop's ordering: hold the channel, then discover the queue is empty.
+	held := q.Notify()
+
+	// An enqueue races in before we get to the select.
+	if err := q.Enqueue("m1", []byte(`{}`), "", "relay_input", time.Minute); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	select {
+	case <-held:
+		// Correct: the channel we were holding is the one that got closed.
+	default:
+		t.Fatal("wake was lost — a waiter holding the pre-enqueue channel never saw it close")
+	}
+
+	// And a channel taken AFTER the wake is a fresh one, still open. This is
+	// the half that makes the ordering matter rather than being incidental.
+	select {
+	case <-q.Notify():
+		t.Fatal("the post-wake channel should be open, not already closed")
+	default:
+	}
+}
+
+// A person's message must never wait behind observability the agent was told to
+// ignore. Before this, a chat message queued behind three permission_resolved
+// notices was delivered after them — and each of those deliveries was a turn
+// during which the chat message could be absorbed.
+func TestInboxPeekPrefersRealMessagesOverSystemEvents(t *testing.T) {
+	q, _ := newTestInbox(t)
+
+	// System events first, so FIFO alone would deliver them first.
+	for _, k := range []string{"sys-1", "sys-2", "sys-3"} {
+		if err := q.Enqueue(k, []byte("notice "+k), "", inboxSourceSystemEvent, time.Minute); err != nil {
+			t.Fatalf("enqueue %s: %v", k, err)
+		}
+	}
+	if err := q.Enqueue("chat-1", []byte("did you get stuck?"), "", "relay_input", time.Hour); err != nil {
+		t.Fatalf("enqueue chat: %v", err)
+	}
+
+	e, err := q.Peek()
+	if err != nil || e == nil {
+		t.Fatalf("peek: %v (entry %v)", err, e)
+	}
+	if e.Key != "chat-1" {
+		t.Fatalf("peeked %q, want the person's message ahead of the notices", e.Key)
+	}
+}
+
+// FIFO is preserved WITHIN a class, which is what actually matters: two messages
+// from the same person still arrive in the order they were sent.
+func TestInboxPeekKeepsFIFOWithinAClass(t *testing.T) {
+	q, _ := newTestInbox(t)
+	for _, k := range []string{"chat-1", "chat-2", "chat-3"} {
+		if err := q.Enqueue(k, []byte(k), "", "relay_input", time.Hour); err != nil {
+			t.Fatalf("enqueue %s: %v", k, err)
+		}
+	}
+	e, err := q.Peek()
+	if err != nil || e == nil {
+		t.Fatalf("peek: %v", err)
+	}
+	if e.Key != "chat-1" {
+		t.Fatalf("peeked %q, want the oldest message first", e.Key)
+	}
+}
+
+// A system event gets ONE attempt. Retrying observability is worse than dropping
+// it: every injection that lands is a turn, and every turn is a window in which
+// a real message gets absorbed.
+func TestInboxSystemEventsGetOneAttempt(t *testing.T) {
+	q, _ := newTestInbox(t)
+	if err := q.Enqueue("sys-1", []byte("notice"), "", inboxSourceSystemEvent, time.Minute); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := q.Enqueue("chat-1", []byte("hello"), "", "relay_input", time.Hour); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Priority puts the chat first; ack it to reach the notice behind it.
+	chat, err := q.Peek()
+	if err != nil || chat == nil {
+		t.Fatalf("peek chat: %v", err)
+	}
+	if chat.Key != "chat-1" {
+		t.Fatalf("peeked %q, want chat-1", chat.Key)
+	}
+	if chat.MaxAttempts != inboxDefaultMaxAttempts {
+		t.Fatalf("chat max_attempts = %d, want the default %d", chat.MaxAttempts, inboxDefaultMaxAttempts)
+	}
+	if err := q.Ack("chat-1", inboxOutcomeConfirmed); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+
+	sys, err := q.Peek()
+	if err != nil || sys == nil {
+		t.Fatalf("peek system event: %v", err)
+	}
+	if sys.MaxAttempts != 1 {
+		t.Fatalf("system event max_attempts = %d, want 1 — retrying observability costs a turn each time",
+			sys.MaxAttempts)
+	}
+}

@@ -108,6 +108,12 @@ func (d *displayServer) displayStateReport() map[string]interface{} {
 		if !cur.ExpiresAt.IsZero() {
 			entry["expires_at"] = cur.ExpiresAt.UTC().Format(time.RFC3339)
 		}
+		// The browser-reported window size (docs/display-viewport-plan.md), present
+		// only once a kiosk has reported it. Last-known: it stays in the report while
+		// the screen is offline (the relay's screen_online flag carries staleness).
+		if vp := d.viewportForScreen(id); vp != nil {
+			entry["viewport"] = map[string]interface{}{"w": vp.W, "h": vp.H, "dpr": vp.DPR}
+		}
 		screens = append(screens, entry)
 	}
 	return map[string]interface{}{"type": "display_state", "data": map[string]interface{}{"screens": screens}}

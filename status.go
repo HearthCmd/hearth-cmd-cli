@@ -45,7 +45,6 @@ func daemonStatus() {
 
 	out := os.Stdout
 	printIdentitySection(out, ident)
-	printSubscriptionSection(out, ident)
 	printVersionSection(out, ident)
 	printThisHostSection(out, ident, local)
 	printHarnessesSection(out, ident)
@@ -87,33 +86,6 @@ func printIdentitySection(out *os.File, ident *ipcResponse) {
 		fmt.Fprintf(out, "  household: %s (%s)\n", cur.Name, cur.Slug)
 		fmt.Fprintf(out, "  role: %s\n", cur.Role)
 	}
-	fmt.Fprintln(out)
-}
-
-func printSubscriptionSection(out *os.File, ident *ipcResponse) {
-	fmt.Fprintln(out, "SUBSCRIPTION")
-	cur := currentOrg(ident.Organizations)
-	if cur == nil {
-		fmt.Fprintln(out, "  (no current household)")
-		fmt.Fprintln(out)
-		return
-	}
-	if !cur.IsPro {
-		fmt.Fprintln(out, "  plan: Free")
-		fmt.Fprintln(out)
-		return
-	}
-	source := cur.ProSource
-	switch source {
-	case "subscription":
-		source = "Subscription"
-	case "offer":
-		source = "Offer code"
-	case "":
-		source = "(unknown)"
-	}
-	fmt.Fprintln(out, "  plan: Pro")
-	fmt.Fprintf(out, "  source: %s\n", source)
 	fmt.Fprintln(out)
 }
 

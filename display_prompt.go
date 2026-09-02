@@ -34,7 +34,13 @@ func buildDisplayPrompt(displaysJSON string) string {
 	b.WriteString("  hearth display publish --target \"<screen>\" <url>\n")
 	b.WriteString("  hearth display publish --target \"<screen>\" --type markdown --file <path>\n\n")
 	b.WriteString("`--target` takes the screen's name or id. `--type` may be url (default), image, video, or markdown. ")
-	b.WriteString("Clear a screen with `hearth display clear --target \"<screen>\"`. Screens available to you:\n\n")
+	b.WriteString("Clear a screen with `hearth display clear --target \"<screen>\"`.\n\n")
+	b.WriteString("Screens differ in size and shape. Before you tune content for one, run ")
+	b.WriteString("`hearth display query --target \"<screen>\"` — it reports what's showing and, when a ")
+	b.WriteString("browser is connected, the screen's size (e.g. `1920×1080 px, 2x density (landscape)`). ")
+	b.WriteString("Use it to tune font scale, layout density, image resolution, and aspect — but keep content ")
+	b.WriteString("responsive: a screen may be a different size next time, and its size is unknown until a browser connects. ")
+	b.WriteString("Screens available to you:\n\n")
 	for _, s := range screens {
 		if s.Name != "" {
 			b.WriteString(fmt.Sprintf("- %s\n", s.Name))

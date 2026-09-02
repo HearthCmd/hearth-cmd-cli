@@ -187,3 +187,58 @@ func stripYAMLFrontmatter(content []byte) []byte {
 	body := rest[idx+4:] // skip past "\n---"
 	return []byte(strings.TrimLeft(body, "\n"))
 }
+
+// stripSkillsExceptFromInstructionFile removes every hearth-skill block whose
+// scope begins with scopePrefix and is not in keep.
+//
+// The counterpart to stripSkillFromInstructionFile, which needs to be TOLD what
+// to remove. Catalog skills give the daemon no such list — a skill dropped from
+// a role's bindings simply stops arriving — so removal has to work from what is
+// on disk instead. Without it, revoking a skill would never take it off the host.
+func stripSkillsExceptFromInstructionFile(instrPath, scopePrefix string, keep []string) error {
+	existing, err := os.ReadFile(instrPath)
+	if err != nil || !isHearthInstructionFile(string(existing)) {
+		return nil
+	}
+	keepSet := map[string]bool{}
+	for _, k := range keep {
+		keepSet[k] = true
+	}
+	const marker = "\n<!-- hearth-skill:"
+	content := string(existing)
+	for {
+		idx := strings.Index(content, marker)
+		removedAny := false
+		for idx >= 0 {
+			rest := content[idx+len(marker):]
+			end := strings.Index(rest, " -->")
+			if end < 0 {
+				break
+			}
+			scope := rest[:end]
+			if strings.HasPrefix(scope, scopePrefix) && !keepSet[scope] {
+				// The block runs from its leading "\n" to the next marker or EOF.
+				blockEnd := len(content)
+				if n := strings.Index(content[idx+len(marker):], marker); n >= 0 {
+					blockEnd = idx + len(marker) + n
+				}
+				content = content[:idx] + content[blockEnd:]
+				removedAny = true
+				break
+			}
+			next := strings.Index(content[idx+len(marker):], marker)
+			if next < 0 {
+				idx = -1
+			} else {
+				idx = idx + len(marker) + next
+			}
+		}
+		if !removedAny {
+			break
+		}
+	}
+	if content == string(existing) {
+		return nil
+	}
+	return os.WriteFile(instrPath, []byte(content), 0o644)
+}

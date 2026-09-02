@@ -68,7 +68,7 @@ func (d *Daemon) handleCreateAgentInstance(conn net.Conn, req ipcRequest, princi
 //
 // The instance's id is the ai_agent_instance_id, so 'org agent stop' can find
 // and terminate it without any extra bookkeeping.
-func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd, modelProvider, modelName, jobTitle, jobMandate, organizationName, lastSessionID, systemPrompt, displays string) (int, error) {
+func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName string, sc agentSpawnContext) (int, error) {
 	// Backstop (docs/household-display-plan.md §1): a display-only host drives
 	// screens and runs no agents. The server rejects placing an agent here, but if
 	// one ever reaches this daemon (e.g. an agent predating a role removal), refuse
@@ -78,9 +78,9 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 		return 0, fmt.Errorf("this host is a display server (no agent role); it does not run agents")
 	}
 
-	localAgent := localAgentForHarness(harnessName)
+	localAgent := localAgentForHarness(sc.HarnessName)
 	if localAgent == "" {
-		return 0, fmt.Errorf("no local CLI binary maps to harness %q", harnessName)
+		return 0, fmt.Errorf("no local CLI binary maps to harness %q", sc.HarnessName)
 	}
 
 	// Expand a leading "~/" to $HOME. The path comes from the server and
@@ -88,7 +88,7 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 	// doesn't know this host's real home. Expand exactly once here so
 	// mkdir, cmd.Dir, the transcript-path derivation, and the interpose
 	// setup all see the same absolute path.
-	cwd = expandHome(cwd)
+	cwd := expandHome(sc.DirectoryPath)
 
 	// Ensure the agent's working directory exists. The default template is
 	// $HOME/hearth_agents which most users won't have yet; without this
@@ -105,15 +105,17 @@ func (d *Daemon) spawnAgentInstance(agentInstanceID, agentName, harnessName, cwd
 		Cwd:               cwd,
 		AIAgentInstanceID: agentInstanceID,
 		Winsize:           &ipcWinsize{Rows: 40, Cols: 120},
-		ModelProvider:     modelProvider,
-		ModelName:         modelName,
+		ModelProvider:     sc.ModelProvider,
+		ModelName:         sc.ModelName,
 		AgentName:         agentName,
-		JobTitle:          jobTitle,
-		JobMandate:        jobMandate,
-		OrganizationName:  organizationName,
-		LastSessionID:     lastSessionID,
-		SystemPrompt:      systemPrompt,
-		Displays:          displays,
+		JobTitle:          sc.JobTitle,
+		JobMandate:        sc.JobMandate,
+		OrganizationName:  sc.OrganizationName,
+		LastSessionID:     sc.LastSessionID,
+		SystemPrompt:      sc.SystemPrompt,
+		Displays:          sc.Displays,
+		Skills:            sc.Skills,
+		HouseholdContext:  sc.HouseholdContext,
 	}
 	s, err := d.newAgentInstance(req)
 	if err != nil {
@@ -286,20 +288,7 @@ func (d *Daemon) handleWakeAgentInstance(agentInstanceID string, spawnCtx json.R
 		return
 	}
 
-	var ctx struct {
-		HarnessName      string `json:"harness_name"`
-		HostID           string `json:"host_id"`
-		DirectoryPath    string `json:"directory_path"`
-		ModelProvider    string `json:"model_provider"`
-		ModelName        string `json:"model_name"`
-		AgentName        string `json:"agent_name"`
-		JobTitle         string `json:"job_title"`
-		JobMandate       string `json:"job_mandate"`
-		OrganizationName string `json:"organization_name"`
-		LastSessionID    string `json:"last_session_id"`
-		SystemPrompt     string `json:"system_prompt"`
-		Displays         string `json:"displays"`
-	}
+	var ctx agentSpawnContext
 	if err := json.Unmarshal(spawnCtx, &ctx); err != nil {
 		log.Printf("daemon: wake %s: invalid spawn_context: %v", agentInstanceID, err)
 		return
@@ -310,7 +299,7 @@ func (d *Daemon) handleWakeAgentInstance(agentInstanceID string, spawnCtx json.R
 		log.Printf("daemon: wake %s: spawn_context host %s doesn't match this daemon %s", agentInstanceID, ctx.HostID, d.hostID)
 		return
 	}
-	if _, err := d.spawnAgentInstance(agentInstanceID, ctx.AgentName, ctx.HarnessName, ctx.DirectoryPath, ctx.ModelProvider, ctx.ModelName, ctx.JobTitle, ctx.JobMandate, ctx.OrganizationName, ctx.LastSessionID, ctx.SystemPrompt, ctx.Displays); err != nil {
+	if _, err := d.spawnAgentInstance(agentInstanceID, ctx.AgentName, ctx); err != nil {
 		log.Printf("daemon: wake %s: spawn failed: %v", agentInstanceID, err)
 	}
 }

@@ -359,6 +359,43 @@ func TestDisplayStateReport(t *testing.T) {
 	if byID["kitchen"]["online"] != false {
 		t.Fatalf("kitchen online = %v, want false (no browser)", byID["kitchen"]["online"])
 	}
+	// No kiosk has reported a viewport → the field is omitted.
+	if _, ok := byID["kitchen"]["viewport"]; ok {
+		t.Fatal("viewport should be absent until a kiosk reports one")
+	}
+}
+
+// A kiosk's viewport frame is parsed, clamped, cached per-screen, and folded into
+// the display_state report (docs/display-viewport-plan.md).
+func TestScreenViewportReport(t *testing.T) {
+	d := newDisplayServer()
+	d.applyDisplayScreens([]displayScreenInfo{{ScreenID: "kitchen", SecretHash: "h1"}})
+
+	// A valid inbound viewport frame is stored.
+	d.handleScreenInbound("kitchen", []byte(`{"type":"viewport","w":1280,"h":800,"dpr":1.5}`))
+	vp := d.viewportForScreen("kitchen")
+	if vp == nil || vp.W != 1280 || vp.H != 800 || vp.DPR != 1.5 {
+		t.Fatalf("viewport = %+v, want 1280x800 dpr 1.5", vp)
+	}
+
+	// It rides the report.
+	screens := d.displayStateReport()["data"].(map[string]interface{})["screens"].([]map[string]interface{})
+	rvp, ok := screens[0]["viewport"].(map[string]interface{})
+	if !ok || rvp["w"].(int) != 1280 {
+		t.Fatalf("report viewport = %v, want w=1280", screens[0]["viewport"])
+	}
+
+	// An out-of-range (untrusted) frame is dropped; the last-known size stands.
+	d.handleScreenInbound("kitchen", []byte(`{"type":"viewport","w":999999,"h":800,"dpr":1}`))
+	if vp := d.viewportForScreen("kitchen"); vp == nil || vp.W != 1280 {
+		t.Fatalf("clamped frame should be dropped, kept %+v", vp)
+	}
+
+	// An unknown upstream frame type is ignored (no panic, no state change).
+	d.handleScreenInbound("kitchen", []byte(`{"type":"who-knows"}`))
+	if vp := d.viewportForScreen("kitchen"); vp == nil || vp.W != 1280 {
+		t.Fatalf("unknown frame should be a no-op, kept %+v", vp)
+	}
 }
 
 // fakeTransport is a displayTransport for tests — records what was sent.

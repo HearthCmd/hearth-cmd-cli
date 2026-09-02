@@ -74,6 +74,8 @@ func main() {
 		runAcquire(os.Args[2:])
 	case "propose-onboarding":
 		runProposeOnboarding(os.Args[2:])
+	case "blueprint":
+		runBlueprint(os.Args[2:])
 	case "presence":
 		runPresence(os.Args[2:])
 	case "run":

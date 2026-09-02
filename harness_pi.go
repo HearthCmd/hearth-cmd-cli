@@ -65,22 +65,23 @@ func (piHarness) TranscriptPath(ctx HarnessCtx) string {
 }
 
 // Pi's TextInput flushes \r cleanly — no extra delay or kick needed.
-func (piHarness) SubmitDelay() time.Duration       { return 50 * time.Millisecond }
-func (piHarness) PostSubmit(_ *os.Process) error   { return nil }
+func (piHarness) SubmitDelay() time.Duration     { return 50 * time.Millisecond }
+func (piHarness) PostSubmit(_ *os.Process) error { return nil }
 
 // PreSpawn: nothing. Pi reads --append-system-prompt and has no trust
 // dialog or instruction file.
 func (piHarness) PreSpawn(_ HarnessCtx) error { return nil }
 
-func (piHarness) InstallSkill(_ HarnessCtx, _, _ string, _ []byte) error { return nil }
-func (piHarness) RemoveSkill(_ HarnessCtx, _, _ string) error             { return nil }
+func (piHarness) InstallSkill(_ HarnessCtx, _, _ string, _ []byte) error         { return nil }
+func (piHarness) RemoveSkill(_ HarnessCtx, _, _ string) error                    { return nil }
+func (piHarness) RemoveSkillsExcept(_ HarnessCtx, _, _ string, _ []string) error { return nil }
 
-func (piHarness) SessionIDPolicy() SessionIDPolicy { return SessionIDMint }
-func (piHarness) ReportsResumeID() bool            { return true }
+func (piHarness) SessionIDPolicy() SessionIDPolicy  { return SessionIDMint }
+func (piHarness) ReportsResumeID() bool             { return true }
 func (piHarness) AssignedSessionID(_ string) string { return "" }
-func (piHarness) NeedsInjectGate() bool            { return false }
-func (piHarness) SupportsAttach() bool             { return true }
-func (piHarness) WarmupPayload() []byte            { return nil }
+func (piHarness) NeedsInjectGate() bool             { return false }
+func (piHarness) SupportsAttach() bool              { return true }
+func (piHarness) WarmupPayload() []byte             { return nil }
 
 // Pi configures its model in its own UI; no env var to set.
 func (piHarness) ModelEnv(_ string) (string, string, bool) { return "", "", false }
