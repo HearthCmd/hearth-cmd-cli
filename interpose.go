@@ -4,9 +4,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -19,14 +21,14 @@ import (
 
 // interposeRequest is the JSON structure sent by the interpose library.
 type interposeRequest struct {
-	Type    string   `json:"type"`              // "open", "spawn", "connect", "read"
-	Path    string   `json:"path,omitempty"`    // file path or binary path
+	Type    string   `json:"type"`               // "open", "spawn", "connect", "read"
+	Path    string   `json:"path,omitempty"`     // file path or binary path
 	OldPath string   `json:"old_path,omitempty"` // source path for rename edits
-	Args    []string `json:"args,omitempty"`    // argv for spawn
-	Flags   string   `json:"flags,omitempty"`   // "w", "rw", "rename" for open
-	Host    string   `json:"host,omitempty"`    // hostname for connect
-	IP      string   `json:"ip,omitempty"`      // IP for connect
-	Port    int      `json:"port,omitempty"`    // port for connect
+	Args    []string `json:"args,omitempty"`     // argv for spawn
+	Flags   string   `json:"flags,omitempty"`    // "w", "rw", "rename" for open
+	Host    string   `json:"host,omitempty"`     // hostname for connect
+	IP      string   `json:"ip,omitempty"`       // IP for connect
+	Port    int      `json:"port,omitempty"`     // port for connect
 	PID     int      `json:"pid,omitempty"`
 	Project *bool    `json:"project,omitempty"` // true if file is within project dir
 }
@@ -37,7 +39,6 @@ type interposeResponse struct {
 	Interrupt bool   `json:"interrupt,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
-
 
 // interposeRelay is a per-socket reference to the agent instance's Relay.
 // Created by startInterposeSock, set via SetRelay after the Relay is created.
@@ -201,10 +202,44 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 		return
 	}
 
+	// Duplicate keys are rejected BEFORE unmarshal, because encoding/json keeps
+	// the LAST value for a repeated key. That turns any string-injection flaw in
+	// the hook into value substitution rather than a parse error: a `connect`
+	// request whose hostname is
+	//
+	//     evil.com","host":"api.anthropic.com
+	//
+	// arrives as {"host":"evil.com","host":"api.anthropic.com",...}, and we would
+	// gate — and display on the phone — the second one while the socket goes to
+	// the first. Worse than a misleading prompt: an existing auto-approve rule for
+	// the allowlisted host fires and nobody is asked at all.
+	//
+	// The hook is being fixed to escape that field, but this check does not
+	// depend on the hook being right, and it holds for every field and every
+	// future request type. See docs/interpose-argv-json-escaping-bug.md and its reply.
+	if err := rejectDuplicateJSONKeys(line); err != nil {
+		log.Printf("Interpose: %s %v [%d bytes] %s",
+			interposeParseErrorMarker, err, len(line), interposeRequestPrefix(line))
+		respond(conn, interposeResponse{
+			Allow:   false,
+			Message: "permission gate rejected a malformed exec request (duplicate field)",
+		})
+		return
+	}
+
 	var req interposeRequest
 	if err := json.Unmarshal(line, &req); err != nil {
-		log.Printf("Interpose: bad request: %v", err)
-		respond(conn, interposeResponse{Allow: false})
+		// Log a bounded, sanitized prefix. A bare "bad request" reaches the
+		// operator as an inscrutable exit 126 with nothing on the server, and
+		// diagnosing the last one meant reading a host's daemon log by hand.
+		// The prefix is what distinguishes "arrived truncated" from "arrived
+		// mis-escaped" without another round trip.
+		log.Printf("Interpose: %s %v [%d bytes] %s",
+			interposeParseErrorMarker, err, len(line), interposeRequestPrefix(line))
+		respond(conn, interposeResponse{
+			Allow:   false,
+			Message: "permission gate could not parse the exec request",
+		})
 		return
 	}
 
@@ -662,18 +697,194 @@ func recvWithAncillary(conn net.Conn) ([]byte, int) {
 							}
 						}
 					}
-					return buf[:n], seccompFd
+
+					// One recvmsg is not one request. This is a SOCK_STREAM
+					// socket, so the kernel may deliver a message in pieces, and
+					// the hook writes the payload and its trailing newline as two
+					// separate writes — a second natural split point. Anything
+					// larger than the 4 KiB buffer above was therefore handed to
+					// json.Unmarshal truncated, and denied fail-closed with no
+					// indication that size was the reason.
+					//
+					// The recvmsg has to stay: the SCM_RIGHTS fd for the seccomp
+					// handoff rides the FIRST chunk, so this cannot simply become
+					// a bufio read. Take the first chunk here, then read to the
+					// delimiter like the darwin path always has.
+					line, err := readToNewline(conn, append([]byte(nil), buf[:n]...))
+					if err != nil {
+						log.Printf("Interpose: %s reading request (%d bytes buffered): %v",
+							interposeParseErrorMarker, len(line), err)
+						if seccompFd >= 0 {
+							syscall.Close(seccompFd)
+						}
+						return nil, -1
+					}
+					return line, seccompFd
 				}
 			}
 		}
 	}
 
-	// Fallback: normal buffered read
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	reader := bufio.NewReader(conn)
+	// Fallback (darwin, and linux when the socket isn't a *net.UnixConn):
+	// buffered read to the delimiter. Bounded — bufio grows its buffer without
+	// limit otherwise, so a hook that never sends a newline is an OOM.
+	conn.SetReadDeadline(time.Now().Add(interposeReadTimeout))
+	reader := bufio.NewReader(io.LimitReader(conn, interposeMaxRequestBytes))
 	line, err := reader.ReadBytes('\n')
 	if err != nil {
 		return nil, -1
 	}
 	return line, -1
+}
+
+// interposeMaxRequestBytes caps one interpose request. The hook refuses to build
+// anything above its own GL_MAX_REQ_BYTES (128 KiB), so this is that ceiling plus
+// slack: past it we are not reading a request, we are being fed.
+const interposeMaxRequestBytes = 256 * 1024
+
+// interposeReadTimeout bounds how long we wait for the rest of a request. A hook
+// that opened a connection and stalled must not hold a daemon goroutine.
+const interposeReadTimeout = 5 * time.Second
+
+// readToNewline extends have until it contains the delimiter, the cap is hit, or
+// the deadline passes. A request that already arrived whole costs one IndexByte
+// and no syscall, which is the overwhelmingly common case.
+func readToNewline(conn net.Conn, have []byte) ([]byte, error) {
+	if bytes.IndexByte(have, '\n') >= 0 {
+		return have, nil
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(interposeReadTimeout))
+	defer conn.SetReadDeadline(time.Time{})
+
+	var chunk [4096]byte
+	for len(have) < interposeMaxRequestBytes {
+		n, err := conn.Read(chunk[:])
+		if n > 0 {
+			have = append(have, chunk[:n]...)
+			if bytes.IndexByte(chunk[:n], '\n') >= 0 {
+				return have, nil
+			}
+		}
+		if err != nil {
+			return have, err
+		}
+	}
+	return have, fmt.Errorf("request exceeded %d bytes with no newline", interposeMaxRequestBytes)
+}
+
+// interposeParseErrorMarker is a stable, greppable token for every way an
+// interpose request fails to become a decision. `grep interpose-bad-request` on a
+// host's daemon log is the whole diagnostic, rather than knowing which phrasing
+// to look for.
+const interposeParseErrorMarker = "interpose-bad-request:"
+
+// interposeRequestPrefixBytes bounds what a failed request contributes to the
+// log. Enough to see the shape and where it broke; not enough to spill a
+// multi-KB argument into a file we keep.
+const interposeRequestPrefixBytes = 200
+
+// interposeRequestPrefix renders a request that failed to parse as a bounded,
+// single-line, ASCII-only string safe to put in a log.
+//
+// Arguments can carry secrets, so this is deliberately lossy: capped, control
+// characters escaped, and every non-ASCII byte replaced. It exists to answer one
+// question — did this arrive truncated, or mis-escaped? — not to reconstruct the
+// command.
+func interposeRequestPrefix(line []byte) string {
+	truncated := false
+	if len(line) > interposeRequestPrefixBytes {
+		line = line[:interposeRequestPrefixBytes]
+		truncated = true
+	}
+
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, c := range line {
+		switch {
+		case c == '\n':
+			b.WriteString(`\n`)
+		case c == '\r':
+			b.WriteString(`\r`)
+		case c == '\t':
+			b.WriteString(`\t`)
+		case c == '"':
+			b.WriteString(`\"`)
+		case c == '\\':
+			b.WriteString(`\\`)
+		case c < 0x20 || c >= 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	if truncated {
+		b.WriteString("...")
+	}
+	return b.String()
+}
+
+// interposeMaxJSONDepth bounds recursion in rejectDuplicateJSONKeys. Real
+// requests are flat; deep nesting is someone probing the parser.
+const interposeMaxJSONDepth = 32
+
+// rejectDuplicateJSONKeys returns an error if any object in the document repeats
+// a key.
+//
+// encoding/json silently keeps the last occurrence, which is a value-substitution
+// primitive for anything that can inject a quote into a producer's string field.
+// Standard library JSON offers no option for this, so it is a hand-rolled walk.
+func rejectDuplicateJSONKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := checkJSONValue(dec, 0); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkJSONValue(dec *json.Decoder, depth int) error {
+	if depth > interposeMaxJSONDepth {
+		return fmt.Errorf("nested deeper than %d", interposeMaxJSONDepth)
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		// A syntax error here is not this check's business — json.Unmarshal
+		// reports it next, with a better message.
+		return nil //nolint:nilerr // deliberate: defer to Unmarshal for syntax
+	}
+	d, ok := tok.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch d {
+	case '{':
+		seen := make(map[string]bool)
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return nil //nolint:nilerr // defer to Unmarshal
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return nil
+			}
+			if seen[key] {
+				return fmt.Errorf("duplicate key %q", key)
+			}
+			seen[key] = true
+			if err := checkJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, _ = dec.Token() // consume '}'
+	case '[':
+		for dec.More() {
+			if err := checkJSONValue(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, _ = dec.Token() // consume ']'
+	}
+	return nil
 }

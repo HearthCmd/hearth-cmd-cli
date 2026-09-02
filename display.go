@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -466,14 +467,20 @@ func runDisplay(args []string) {
 		case "query":
 			runDisplayQuery(args[1:])
 			return
+		case "list", "ls":
+			runDisplayList(args[1:])
+			return
 		case "--help", "-h":
 			fmt.Fprintln(os.Stderr, "Usage: hearth display [--bind <addr>]\n"+
-				"       hearth display publish <url> --target <screen> [--type url|image|video] [--ttl <seconds>]\n"+
-				"       hearth display publish --target <screen> --type markdown --file <path> [--ttl <seconds>]\n"+
-				"       hearth display query --target <screen>\n"+
-				"       hearth display clear --target <screen>\n"+
+				"       hearth display list [name-filter]                              (discover screens + their ids)\n"+
+				"       hearth display publish <url> --target <screen-id> [--type url|image|video] [--ttl <seconds>]\n"+
+				"       hearth display publish --target <screen-id> --type markdown --file <path> [--ttl <seconds>]\n"+
+				"       hearth display query --target <screen-id>\n"+
+				"       hearth display clear --target <screen-id>\n"+
 				"       hearth display show <url> [--ttl <seconds>]   (local: this box's screen)\n"+
-				"       hearth display clear                          (local: this box's screen)")
+				"       hearth display clear                          (local: this box's screen)\n\n"+
+				"Screens are addressed by id. Run `hearth display list` to see each screen's\n"+
+				"name and id, then pass the id to --target.")
 			return
 		}
 	}
@@ -719,7 +726,7 @@ func runDisplayShow(args []string) {
 
 func runDisplayClear(args []string) {
 	fs := flag.NewFlagSet("display clear", flag.ExitOnError)
-	target := fs.String("target", "", "screen name or id to clear via the relay; omit to clear this box's local screen")
+	target := fs.String("target", "", "screen id to clear via the relay (from `hearth display list`); omit to clear this box's local screen")
 	fs.Parse(args)
 	if *target != "" {
 		sendDisplayRequest("display_clear", map[string]interface{}{"target": *target}, "cleared "+*target)
@@ -728,14 +735,58 @@ func runDisplayClear(args []string) {
 	sendDisplayControl(controlCommand{Cmd: "clear"})
 }
 
-// runDisplayPublish publishes content to a NAMED screen through the relay — the
-// authorized path (display.publish is gated by authorize()). Distinct from
-// `show`, which drives THIS box's own screen over the local socket and skips the
+// contentTypeByExt maps a URL's file extension to the display content kind whose
+// kiosk renderer fits it — an <img>/<video>, not the default <iframe>. Only
+// unambiguous media extensions are listed; anything else stays a `url`.
+var contentTypeByExt = map[string]string{
+	".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
+	".webp": "image", ".avif": "image", ".bmp": "image", ".svg": "image",
+	".ico": "image", ".apng": "image", ".jfif": "image",
+	".mp4": "video", ".webm": "video", ".ogv": "video", ".mov": "video", ".m4v": "video",
+}
+
+// classifyContentURL returns "image" or "video" when a content URL's path ends in
+// an unambiguous media extension, else "" (leave it a url). Query and fragment are
+// ignored, so `.../photo.jpg?w=1280` still classifies as image. An extensionless
+// image URL (e.g. an Unsplash/CDN link) can't be detected — the agent must pass
+// --type image for those.
+func classifyContentURL(raw string) string {
+	path := raw
+	if u, err := url.Parse(raw); err == nil && u.Path != "" {
+		path = u.Path
+	} else if i := strings.IndexAny(path, "?#"); i >= 0 {
+		// url.Parse gave us nothing usable — trim query/fragment by hand.
+		path = path[:i]
+	}
+	dot := strings.LastIndex(path, ".")
+	if dot < 0 {
+		return ""
+	}
+	return contentTypeByExt[strings.ToLower(path[dot:])]
+}
+
+// flagPassed reports whether a flag was explicitly set on the command line (vs left
+// at its default): flag.FlagSet.Visit only walks flags that were actually set.
+func flagPassed(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
+}
+
+// runDisplayPublish publishes content to a screen (addressed by id via --target)
+// through the relay — the authorized path (display.publish is gated by authorize()).
+// Ids come from `hearth display list`; the action verbs never take a name. Distinct
+// from `show`, which drives THIS box's own screen over the local socket and skips the
 // relay/authorize. This is the verb an agent runs to put content on a screen.
 func runDisplayPublish(args []string) {
-	const usage = "Usage: hearth display publish <url> --target <screen> [--type url|image|video] [--ttl <seconds>]\n" +
-		"       hearth display publish --target <screen> --type markdown --file <path> [--ttl <seconds>]\n" +
-		"       hearth display publish --target <screen> --type html --file <path> [--ttl <seconds>]"
+	const usage = "Usage: hearth display publish <url> --target <screen-id> [--type url|image|video] [--ttl <seconds>]\n" +
+		"       hearth display publish --target <screen-id> --type markdown --file <path> [--ttl <seconds>]\n" +
+		"       hearth display publish --target <screen-id> --type html --file <path> [--ttl <seconds>]\n" +
+		"\n--target is a screen id; run `hearth display list` to see screens and their ids."
 	// An optional leading positional: the content URL for url/image/video.
 	// Markdown carries no URL — it comes from --file instead.
 	var content string
@@ -744,7 +795,7 @@ func runDisplayPublish(args []string) {
 		args = args[1:]
 	}
 	fs := flag.NewFlagSet("display publish", flag.ExitOnError)
-	target := fs.String("target", "", "screen name or id to publish to")
+	target := fs.String("target", "", "screen id to publish to (from `hearth display list`)")
 	ctype := fs.String("type", "url", "content type: url | image | video | markdown | html")
 	file := fs.String("file", "", "path to a markdown/html file (required for --type markdown or --type html)")
 	ttl := fs.Int("ttl", 0, "seconds until the content expires (0 = until cleared)")
@@ -752,6 +803,18 @@ func runDisplayPublish(args []string) {
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "hearth: --target <screen> required\n"+usage)
 		os.Exit(1)
+	}
+
+	// Fix the default-type footgun: the `url` kind mounts an <iframe>, which shows
+	// nothing for a raw image (and nothing for a site that refuses framing). When the
+	// caller left --type at its default and the content URL clearly points at an image
+	// or video (by extension), classify it so a bare image URL just renders. An explicit
+	// --type is always honored.
+	if content != "" && !flagPassed(fs, "type") {
+		if k := classifyContentURL(content); k != "" {
+			*ctype = k
+			fmt.Fprintf(os.Stderr, "hearth: detected %s URL; publishing as --type %s (pass --type to override)\n", k, k)
+		}
 	}
 
 	payload := map[string]interface{}{"target": *target, "content_type": *ctype, "ttl_seconds": *ttl}
@@ -799,10 +862,10 @@ func runDisplayPublish(args []string) {
 // screen's display server reports into, so this needs no round trip to the box.
 func runDisplayQuery(args []string) {
 	fs := flag.NewFlagSet("display query", flag.ExitOnError)
-	target := fs.String("target", "", "screen name or id to query")
+	target := fs.String("target", "", "screen id to query (from `hearth display list`)")
 	fs.Parse(args)
 	if *target == "" {
-		fmt.Fprintln(os.Stderr, "Usage: hearth display query --target <screen>")
+		fmt.Fprintln(os.Stderr, "Usage: hearth display query --target <screen-id>   (run `hearth display list` for ids)")
 		os.Exit(1)
 	}
 	data, err := sendWSRequest("display_query", map[string]interface{}{"target": *target})
@@ -851,6 +914,109 @@ func runDisplayQuery(args []string) {
 	if resp.Viewport != nil {
 		fmt.Printf("  screen size: %d×%d px, %gx density (%s)\n",
 			resp.Viewport.W, resp.Viewport.H, resp.Viewport.DPR, resp.Viewport.Orientation)
+	}
+}
+
+// runDisplayList enumerates the household's display screens with their ids — the
+// discovery step before any publish/clear/query, which all address a screen BY ID.
+// An optional positional argument filters by a case-insensitive substring of the
+// screen name (the one place fuzzy name matching lives; the action verbs never
+// accept a name). The relay returns the caller's reachable set: shared household
+// screens plus any personal screens this agent's position has been granted.
+func runDisplayList(args []string) {
+	fs := flag.NewFlagSet("display list", flag.ExitOnError)
+	fs.Parse(args)
+	filter := strings.ToLower(strings.TrimSpace(strings.Join(fs.Args(), " ")))
+
+	data, err := sendWSRequest("list_display_screens", map[string]interface{}{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
+		os.Exit(1)
+	}
+	var resp struct {
+		Error   string `json:"error"`
+		Screens []struct {
+			ID           string `json:"id"`
+			Name         string `json:"name"`
+			IsTemp       bool   `json:"is_temp"`
+			Personal     bool   `json:"personal"`
+			Access       string `json:"access"`
+			HostOnline   bool   `json:"host_online"`
+			ScreenOnline bool   `json:"screen_online"`
+			Kind         string `json:"kind"`
+			Payload      string `json:"payload"`
+			Expired      bool   `json:"expired"`
+			Viewport     *struct {
+				W           int     `json:"w"`
+				H           int     `json:"h"`
+				DPR         float64 `json:"dpr"`
+				Orientation string  `json:"orientation"`
+			} `json:"viewport"`
+		} `json:"screens"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	if resp.Error != "" {
+		fmt.Fprintf(os.Stderr, "hearth: %s\n", resp.Error)
+		os.Exit(1)
+	}
+
+	shown := 0
+	for _, sc := range resp.Screens {
+		if filter != "" && !strings.Contains(strings.ToLower(sc.Name), filter) {
+			continue
+		}
+		shown++
+		name := sc.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		// Line 1: name — id, so the id is trivial to copy into --target.
+		fmt.Printf("%s — %s\n", name, sc.ID)
+
+		// Line 2: what you may do, whether it's reachable, and shared vs personal.
+		access := sc.Access
+		if access == "" {
+			access = "no access"
+		}
+		var status string
+		switch {
+		case !sc.HostOnline:
+			status = "display server offline"
+		case !sc.ScreenOnline:
+			status = "no browser connected"
+		default:
+			status = "online"
+		}
+		kind := "shared"
+		if sc.Personal {
+			kind = "personal"
+		}
+		if sc.IsTemp {
+			kind += ", temporary"
+		}
+		fmt.Printf("  access: %s   %s   (%s)\n", access, status, kind)
+
+		// Line 3: size, when a browser has reported it — tune content to it.
+		if sc.Viewport != nil {
+			fmt.Printf("  size: %d×%d px, %gx (%s)\n",
+				sc.Viewport.W, sc.Viewport.H, sc.Viewport.DPR, sc.Viewport.Orientation)
+		}
+
+		// Line 4: what's currently on the screen.
+		switch {
+		case sc.Expired || sc.Kind == "" || sc.Kind == "unknown":
+			fmt.Printf("  showing: nothing\n")
+		default:
+			fmt.Printf("  showing: %s %s\n", sc.Kind, sc.Payload)
+		}
+	}
+
+	if shown == 0 {
+		if filter != "" {
+			fmt.Fprintf(os.Stderr, "hearth: no display screens match %q\n", filter)
+		} else {
+			fmt.Fprintln(os.Stderr, "hearth: no display screens available in this household")
+		}
 	}
 }
 

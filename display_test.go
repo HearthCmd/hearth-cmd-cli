@@ -285,6 +285,29 @@ func TestHandleRelayFrame_ContentType(t *testing.T) {
 	}
 }
 
+// classifyContentURL upgrades a bare image/video URL (by extension) to the matching
+// content kind so it renders as media, and leaves articles and extensionless URLs as
+// `url`. Query/fragment are ignored; the match is case-insensitive.
+func TestClassifyContentURL(t *testing.T) {
+	cases := []struct{ url, want string }{
+		{"https://x/pic.jpg", "image"},
+		{"https://images.pexels.com/photos/312418/pexels-photo-312418.jpeg", "image"},
+		{"https://img.cdn/photo.JPG?w=1280&h=720", "image"}, // query stripped, case-insensitive
+		{"https://upload.wikimedia.org/thumb/d/da/x/1280px-x.jpg", "image"},
+		{"https://cdn/clip.mp4", "video"},
+		{"https://cdn/clip.webm#t=10", "video"},                                  // fragment stripped
+		{"https://www.allrecipes.com/recipe/20143/ceviche/", ""},                 // article → iframe, keep url
+		{"https://images.unsplash.com/photo-1551717743-49959800b1f6?w=1280", ""}, // no extension → keep url
+		{"https://en.wikipedia.org/wiki/Cat", ""},                                // dot only in host
+		{"https://www.youtube.com/watch?v=sdKydVFkvKQ", ""},                      // a page, not a media file
+	}
+	for _, c := range cases {
+		if got := classifyContentURL(c.url); got != c.want {
+			t.Errorf("classifyContentURL(%q) = %q, want %q", c.url, got, c.want)
+		}
+	}
+}
+
 // goldmark renders markdown to HTML with raw HTML escaped (no script injection
 // from agent-authored content).
 func TestRenderMarkdown(t *testing.T) {

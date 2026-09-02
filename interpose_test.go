@@ -15,6 +15,9 @@ package main
 // a write — both are user-visible bugs.
 
 import (
+	"bytes"
+	"encoding/json"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,9 +34,9 @@ func TestIsSafeCommand_AllowsKnownReadOnlyTools(t *testing.T) {
 		"grep foo bar.txt",
 		"echo hello",
 		"hearth status",
-		"VAR=val ls",                  // env-var prefix skipped
-		"FOO=bar BAZ=qux pwd",         // multiple env-var prefixes
-		"/usr/local/bin/cat file",     // basename extracted
+		"VAR=val ls",              // env-var prefix skipped
+		"FOO=bar BAZ=qux pwd",     // multiple env-var prefixes
+		"/usr/local/bin/cat file", // basename extracted
 	} {
 		if !isSafeCommand(cmd) {
 			t.Errorf("expected %q to be safe", cmd)
@@ -371,5 +374,116 @@ func TestTranslate_SpawnJoinsAllArgs(t *testing.T) {
 	parts := strings.Fields(cmd)
 	if !reflect.DeepEqual(parts, wantParts) {
 		t.Errorf("expected joined %v, got %v", wantParts, parts)
+	}
+}
+
+// The SNI allowlist bypass. The hook builds the connect request with the raw
+// hostname (`"host":"%s"` — the one request builder that does not pre-escape),
+// and the hostname is memcpy'd straight out of a ClientHello, so a gated process
+// controls it. encoding/json keeps the LAST duplicate key, so without this check
+// the daemon gates api.anthropic.com while the socket goes to evil.com — and an
+// existing WebFetch auto-approve rule for the allowlisted host means nobody is
+// even asked.
+func TestRejectDuplicateJSONKeys_BlocksSNIHostInjection(t *testing.T) {
+	// What the hook emits for SNI `evil.com","host":"api.anthropic.com`.
+	line := []byte(`{"type":"connect","host":"evil.com","host":"api.anthropic.com","ip":"1.2.3.4","port":443,"pid":42}`)
+
+	// Establish the danger is real before asserting we stop it: stock unmarshal
+	// silently prefers the attacker's second value.
+	var req interposeRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.Host != "api.anthropic.com" {
+		t.Fatalf("precondition failed: encoding/json gave host=%q, expected last-wins to yield the allowlisted host", req.Host)
+	}
+
+	if err := rejectDuplicateJSONKeys(line); err == nil {
+		t.Fatal("duplicate host key accepted — the allowlist bypass is open")
+	}
+}
+
+func TestRejectDuplicateJSONKeys_AllowsOrdinaryRequests(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"spawn","path":"/bin/echo","args":["echo","hi"],"pid":1}`,
+		`{"type":"connect","host":"api.anthropic.com","ip":"1.2.3.4","port":443,"pid":2}`,
+		`{"type":"open","path":"/tmp/x","flags":"w","pid":3,"project":true}`,
+		// A repeated key in DIFFERENT objects is not a duplicate.
+		`{"type":"spawn","args":["a","a"],"path":"/bin/x","pid":4}`,
+	} {
+		if err := rejectDuplicateJSONKeys([]byte(line)); err != nil {
+			t.Errorf("rejected a legitimate request %s: %v", line, err)
+		}
+	}
+}
+
+// Syntax errors are json.Unmarshal's to report — it has the better message, and
+// this check running first must not swallow or reword them.
+func TestRejectDuplicateJSONKeys_DefersToUnmarshalOnGarbage(t *testing.T) {
+	for _, line := range []string{
+		`{"type":"spawn","args":["a",`, // truncated
+		`not json at all`,
+		``,
+	} {
+		if err := rejectDuplicateJSONKeys([]byte(line)); err != nil {
+			t.Errorf("reported a syntax error that belongs to Unmarshal (%s): %v", line, err)
+		}
+	}
+}
+
+// A request larger than the old 4 KiB recvmsg buffer used to reach Unmarshal
+// truncated and be denied fail-closed, with size never named as the reason.
+func TestReadToNewline_ReassemblesAcrossChunks(t *testing.T) {
+	bigArg := strings.Repeat("x", 12000)
+	payload := `{"type":"spawn","path":"/bin/echo","args":["echo","` + bigArg + `"],"pid":1}`
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	go func() {
+		// Deliberately split mid-payload, and send the newline separately —
+		// which is exactly what the hook's two writes do.
+		client.Write([]byte(payload[:1000]))
+		client.Write([]byte(payload[1000:]))
+		client.Write([]byte("\n"))
+	}()
+
+	first := make([]byte, 512) // stand-in for the 4 KiB recvmsg first chunk
+	n, err := server.Read(first)
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+
+	line, err := readToNewline(server, append([]byte(nil), first[:n]...))
+	if err != nil {
+		t.Fatalf("readToNewline: %v", err)
+	}
+
+	var req interposeRequest
+	if err := json.Unmarshal(bytes.TrimRight(line, "\n"), &req); err != nil {
+		t.Fatalf("reassembled request did not parse: %v", err)
+	}
+	if len(req.Args) != 2 || req.Args[1] != bigArg {
+		t.Fatalf("argv did not survive reassembly: got %d args, second is %d bytes",
+			len(req.Args), len(req.Args[1]))
+	}
+}
+
+func TestInterposeRequestPrefix_BoundedAndSanitized(t *testing.T) {
+	got := interposeRequestPrefix([]byte("{\"a\":\"b\"}\n\x00\x1b[31m\xff"))
+	for _, bad := range []string{"\n", "\x00", "\x1b", "\xff"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("prefix leaked a raw control/non-ASCII byte %q: %s", bad, got)
+		}
+	}
+
+	long := interposeRequestPrefix(bytes.Repeat([]byte("a"), interposeRequestPrefixBytes*3))
+	if !strings.HasSuffix(long, `"...`) {
+		t.Errorf("an over-long request should be marked truncated, got tail %q", long[len(long)-8:])
+	}
+	// Cap plus quotes and the ellipsis — never the whole argument.
+	if len(long) > interposeRequestPrefixBytes+8 {
+		t.Errorf("prefix ran to %d bytes, cap is %d", len(long), interposeRequestPrefixBytes)
 	}
 }
