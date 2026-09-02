@@ -95,6 +95,23 @@ func TestApplyControl(t *testing.T) {
 	}
 }
 
+// Raw HTML is passed through untouched (no markdown render, no URL fetch): the kiosk
+// sandboxes it. An empty html show errors.
+func TestApplyControl_HTML(t *testing.T) {
+	d := newDisplayServer()
+	const raw = "<h1 style=\"color:red\">Hi</h1>"
+	if err := d.applyControl(controlCommand{Cmd: "show", Kind: "html", HTML: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got := d.current()
+	if got.Kind != "html" || got.Payload != raw {
+		t.Fatalf("html show current = {Kind:%q Payload:%q}, want html passthrough %q", got.Kind, got.Payload, raw)
+	}
+	if err := d.applyControl(controlCommand{Cmd: "show", Kind: "html"}); err == nil {
+		t.Fatal("html show with no content should error")
+	}
+}
+
 // While unclaimed the screen shows its pairing code, overriding ambient/published;
 // clearing it returns to normal content.
 func TestCurrentShowsPairingCode(t *testing.T) {
@@ -287,6 +304,18 @@ func TestRenderMarkdown(t *testing.T) {
 	}
 	if strings.Contains(unsafe, "<script>") {
 		t.Fatalf("raw <script> should be escaped, got:\n%s", unsafe)
+	}
+
+	// GFM tables (extension.GFM) render as a real <table>, not raw pipe characters —
+	// the "markdown table shows as garbage" fix.
+	table, err := renderMarkdown("| Day | Temp |\n| --- | --- |\n| Mon | 72 |\n| Tue | 68 |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"<table>", "<th>Day</th>", "<td>Mon</td>", "<td>72</td>"} {
+		if !strings.Contains(table, want) {
+			t.Fatalf("GFM table missing %q:\n%s", want, table)
+		}
 	}
 }
 

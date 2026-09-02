@@ -60,6 +60,7 @@ func (d *displayServer) handleRelayFrame(data []byte) bool {
 		Kind       string              `json:"kind"`
 		URL        string              `json:"url"`
 		Markdown   string              `json:"markdown"`
+		HTML       string              `json:"html"`
 		TTLSeconds int                 `json:"ttl_seconds"`
 		Screens    []displayScreenInfo `json:"screens"`
 	}
@@ -71,7 +72,7 @@ func (d *displayServer) handleRelayFrame(data []byte) bool {
 		// Route to the target screen the relay resolved (resolveDisplayScreen). An
 		// empty screen_id, or this box's own screen, collapses onto the primary
 		// screen (screenKey), so a single-screen box is unchanged.
-		_ = d.applyControlForScreen(msg.ScreenID, controlCommand{Cmd: msg.Cmd, Kind: msg.Kind, URL: msg.URL, Markdown: msg.Markdown, TTLSeconds: msg.TTLSeconds})
+		_ = d.applyControlForScreen(msg.ScreenID, controlCommand{Cmd: msg.Cmd, Kind: msg.Kind, URL: msg.URL, Markdown: msg.Markdown, HTML: msg.HTML, TTLSeconds: msg.TTLSeconds})
 		return true
 	case "display_screens":
 		// The relay's authoritative set of screens bound to this host (§B3): cache it

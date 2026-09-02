@@ -603,9 +603,10 @@ func (d *displayServer) serve(bind string) (func(), error) {
 
 type controlCommand struct {
 	Cmd        string `json:"cmd"`         // "show" | "clear"
-	Kind       string `json:"kind"`        // content type: "url" (default) | "image" | "video" | "markdown"
+	Kind       string `json:"kind"`        // content type: "url" (default) | "image" | "video" | "markdown" | "html"
 	URL        string `json:"url"`         // the content URL, for kind url|image|video
 	Markdown   string `json:"markdown"`    // raw markdown source, for kind=="markdown"
+	HTML       string `json:"html"`        // raw HTML source, for kind=="html" (rendered sandboxed on the kiosk)
 	TTLSeconds int    `json:"ttl_seconds"` // 0 = no expiry (until cleared)
 }
 
@@ -654,8 +655,15 @@ func (d *displayServer) applyControlForScreen(screenID string, cmd controlComman
 				return fmt.Errorf("render markdown: %w", err)
 			}
 			payload = html
+		case "html":
+			// Pass raw HTML through untouched — the kiosk renders it in a sandboxed
+			// iframe. No render step (unlike markdown), no URL fetch (unlike url).
+			if cmd.HTML == "" {
+				return fmt.Errorf("html show requires html content")
+			}
+			payload = cmd.HTML
 		default:
-			return fmt.Errorf("unknown content type %q (url|image|video|markdown)", kind)
+			return fmt.Errorf("unknown content type %q (url|image|video|markdown|html)", kind)
 		}
 		a := screenAssignment{Kind: kind, Payload: payload}
 		if cmd.TTLSeconds > 0 {
@@ -726,7 +734,8 @@ func runDisplayClear(args []string) {
 // relay/authorize. This is the verb an agent runs to put content on a screen.
 func runDisplayPublish(args []string) {
 	const usage = "Usage: hearth display publish <url> --target <screen> [--type url|image|video] [--ttl <seconds>]\n" +
-		"       hearth display publish --target <screen> --type markdown --file <path> [--ttl <seconds>]"
+		"       hearth display publish --target <screen> --type markdown --file <path> [--ttl <seconds>]\n" +
+		"       hearth display publish --target <screen> --type html --file <path> [--ttl <seconds>]"
 	// An optional leading positional: the content URL for url/image/video.
 	// Markdown carries no URL — it comes from --file instead.
 	var content string
@@ -736,8 +745,8 @@ func runDisplayPublish(args []string) {
 	}
 	fs := flag.NewFlagSet("display publish", flag.ExitOnError)
 	target := fs.String("target", "", "screen name or id to publish to")
-	ctype := fs.String("type", "url", "content type: url | image | video | markdown")
-	file := fs.String("file", "", "path to a markdown file (required for --type markdown)")
+	ctype := fs.String("type", "url", "content type: url | image | video | markdown | html")
+	file := fs.String("file", "", "path to a markdown/html file (required for --type markdown or --type html)")
 	ttl := fs.Int("ttl", 0, "seconds until the content expires (0 = until cleared)")
 	fs.Parse(args)
 	if *target == "" {
@@ -764,8 +773,22 @@ func runDisplayPublish(args []string) {
 			os.Exit(1)
 		}
 		payload["markdown"] = string(md)
+	case "html":
+		// Full HTML document/fragment, delivered INLINE (like markdown) — never a
+		// file:// URL, which a browser screen can't load. Rendered sandboxed on the
+		// kiosk. Use this for styling markdown can't do (color, custom layout).
+		if *file == "" {
+			fmt.Fprintln(os.Stderr, "hearth: --file <path> is required for --type html")
+			os.Exit(1)
+		}
+		htmlBytes, err := os.ReadFile(*file)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hearth: read %s: %v\n", *file, err)
+			os.Exit(1)
+		}
+		payload["html"] = string(htmlBytes)
 	default:
-		fmt.Fprintln(os.Stderr, "hearth: --type must be url, image, video, or markdown")
+		fmt.Fprintln(os.Stderr, "hearth: --type must be url, image, video, markdown, or html")
 		os.Exit(1)
 	}
 	sendDisplayRequest("display_publish", payload, "published to "+*target)

@@ -30,12 +30,14 @@ func runProposeOnboarding(args []string) {
 	itemsFile := fs.String("items-file", "", "Path to a file holding the JSON array of proposed items. Preferred over --items. Each item: {op, primitive, risk, why, fields{...}}.")
 	rationale := fs.String("rationale", "", "One-paragraph rationale for the bundle, shown to the person who reviews it.")
 	intentTargetID := fs.String("intent-target-id", "", "The entity being onboarded (e.g. the new agent's position id).")
-	// SHIPPING THESE? The Facilitator is not yet told to use them. The prompt
-	// line lives in relay/cmd/hearth-cloud/provisioning_prompts.go
-	// (facilitatorHowTo) and was held back because this parses with
-	// flag.ExitOnError — on a daemon predating these flags, an unknown flag does
-	// not degrade, it exits(2) and takes the whole proposal down. Add the prompt
-	// line back in the release that puts this binary on hosts, not before.
+	// Blueprint provenance (docs/blueprints.md §9). Live as of CLI v2.7.0; the
+	// Facilitator is told to pass these in facilitatorHowTo.
+	//
+	// Worth remembering if a flag is ever added here again: this parses with
+	// flag.ExitOnError, so on a daemon that predates a flag, an unknown one does
+	// not degrade — it exits(2) and takes the whole proposal down. The relay
+	// ships in minutes and the CLI in weeks, so a prompt line teaching a new
+	// flag must wait for the release that puts the binary on hosts.
 	sourceBlueprint := fs.String("source-blueprint", "", "The published blueprint this bundle was drawn from, e.g. verge_labs/dj. Provenance only — it records where the household's shape came from and binds nothing.")
 	sourceBlueprintVersion := fs.String("source-blueprint-version", "", "The version of that blueprint, when known.")
 	fs.Parse(args)
