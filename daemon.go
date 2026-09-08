@@ -194,6 +194,10 @@ type ipcResponse struct {
 	DisplayActive bool   `json:"display_active,omitempty"`
 	DisplayBind   string `json:"display_bind,omitempty"`
 	DisplayError  string `json:"display_error,omitempty"`
+	// DisplayPairURLs are the browser-loadable LAN URLs for pairing a new screen
+	// (one per private IPv4). The bind host is usually 0.0.0.0, which a browser can't
+	// load, so `hearth status` shows these concrete addresses instead.
+	DisplayPairURLs []string `json:"display_pair_urls,omitempty"`
 
 	// harnesses_response: server-side harness names whose local binary the
 	// daemon can resolve on PATH. Populated by handleHarnesses.
@@ -890,21 +894,46 @@ func (d *Daemon) startDisplaySubsystem() {
 	// auto-pairs one fixed screen here.
 
 	bind := displayBindAddr()
-	d.identityMu.Lock()
-	d.displayBind = bind
-	d.identityMu.Unlock()
 
-	stop, err := ds.serve(bind)
+	// Bind the LAN socket up front, hunting upward from the preferred port when it's
+	// taken — the common case being another display daemon already holding it on this
+	// shared box. Only after every port in the probe window is busy do we fail (and
+	// still run as an agent host). See listenDisplayLAN.
+	ln, actual, err := listenDisplayLAN(bind)
 	if err != nil {
-		// Loud + surfaced (not a swallowed one-liner): a bind collision is the common
-		// cause — another display host on this same box already holds the port. The
-		// daemon keeps running as an agent host, but `hearth status` now shows this.
 		d.identityMu.Lock()
+		d.displayBind = bind
 		d.displayError = err.Error()
 		d.identityMu.Unlock()
 		log.Printf("daemon: DISPLAY SUBSYSTEM FAILED TO START on %s: %v", bind, err)
-		log.Printf("daemon: if another display server on this machine already uses that " +
-			"address, set a different `display_bind` in ~/.hearth/credentials (e.g. 0.0.0.0:8091) and restart")
+		log.Printf("daemon: %d consecutive ports from %s were all in use — free one or set a lower `display_bind` in ~/.hearth/credentials and restart", maxDisplayPortProbes, bind)
+		return
+	}
+	if actual != bind {
+		// Landed on a hunted port (another display daemon holds the preferred one).
+		// Persist it so the browser-facing URL stays stable across restarts — a paired
+		// browser keeps working instead of chasing a port that moved.
+		writeConfigValue("display_bind", actual)
+		log.Printf("daemon: display_bind %s in use; serving on %s instead (persisted to ~/.hearth/credentials)", bind, actual)
+	}
+
+	d.identityMu.Lock()
+	d.displayBind = actual
+	d.identityMu.Unlock()
+
+	// Advertise the reachable pairing URLs (LAN IP:port) to the relay in each
+	// display_state report so the app can show which address to open in a browser.
+	ds.bindAddr = actual
+	ds.pairingURLs = displayPairingURLs(actual)
+
+	stop, err := ds.serve(ln)
+	if err != nil {
+		// The LAN bind already succeeded; this is the local control socket failing.
+		ln.Close()
+		d.identityMu.Lock()
+		d.displayError = err.Error()
+		d.identityMu.Unlock()
+		log.Printf("daemon: DISPLAY SUBSYSTEM FAILED TO START on %s: %v", actual, err)
 		return
 	}
 
@@ -915,7 +944,7 @@ func (d *Daemon) startDisplaySubsystem() {
 
 	d.display = ds
 	d.displayStop = stop
-	log.Printf("daemon: display subsystem active (role=display) on %s", bind)
+	log.Printf("daemon: display subsystem active (role=display) on %s", actual)
 }
 
 // hostHasDisplayRole reports whether this host carries the display role. Roles are
@@ -2294,20 +2323,27 @@ func (d *Daemon) handleIdentity(conn net.Conn) {
 	}
 	wsConnected := d.daemonWS != nil && d.daemonWS.IsConnected()
 
+	displayActive := displayBind != "" && displayError == ""
+	var displayPairURLs []string
+	if displayActive {
+		displayPairURLs = displayPairingURLs(displayBind)
+	}
+
 	sendControl(conn, ipcResponse{
-		Type:          "identity_response",
-		Email:         email,
-		HumanUserID:   humanUserID,
-		Organizations: orgs,
-		HostID:        d.hostID,
-		Hostname:      hostname,
-		StartedAt:     d.startedAt.Format(time.RFC3339),
-		WSConnected:   wsConnected,
-		ServerURL:     wsURL,
-		AgentHomePath: agentHome,
-		DisplayBind:   displayBind,
-		DisplayError:  displayError,
-		DisplayActive: displayBind != "" && displayError == "",
+		Type:            "identity_response",
+		Email:           email,
+		HumanUserID:     humanUserID,
+		Organizations:   orgs,
+		HostID:          d.hostID,
+		Hostname:        hostname,
+		StartedAt:       d.startedAt.Format(time.RFC3339),
+		WSConnected:     wsConnected,
+		ServerURL:       wsURL,
+		AgentHomePath:   agentHome,
+		DisplayBind:     displayBind,
+		DisplayError:    displayError,
+		DisplayActive:   displayActive,
+		DisplayPairURLs: displayPairURLs,
 	})
 }
 

@@ -516,3 +516,59 @@ func TestDisplayServerNotifiesSubscribers(t *testing.T) {
 		t.Fatal("subscriber was not notified of a content change")
 	}
 }
+
+// A display_scroll relay frame is forwarded to the screen's command subscribers
+// with its fields intact, and is applied to the addressed screen (not the primary).
+func TestHandleRelayFrame_Scroll(t *testing.T) {
+	d := newDisplayServer()
+	cmdCh := d.subscribeCmd("kitchen")
+	defer d.unsubscribeCmd("kitchen", cmdCh)
+
+	if !d.handleRelayFrame([]byte(`{"type":"display_scroll","screen_id":"kitchen","cmd":"scroll","dir":"down","amount":"half"}`)) {
+		t.Fatal("handleRelayFrame should consume a display_scroll frame")
+	}
+	select {
+	case cmd := <-cmdCh:
+		if cmd.Cmd != "scroll" || cmd.Dir != "down" || cmd.Amount != "half" || cmd.To != "" {
+			t.Fatalf("forwarded command = %+v, want {scroll down half}", cmd)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scroll command was not forwarded to the subscriber")
+	}
+}
+
+// Scroll is ephemeral: it must not change what the screen is showing.
+func TestScrollDoesNotMutateContent(t *testing.T) {
+	d := newDisplayServer()
+	d.setPublishedForScreen("kitchen", screenAssignment{Kind: "markdown", Payload: "<h1>x</h1>"})
+	cmdCh := d.subscribeCmd("kitchen")
+	defer d.unsubscribeCmd("kitchen", cmdCh)
+
+	d.handleRelayFrame([]byte(`{"type":"display_scroll","screen_id":"kitchen","cmd":"scroll","to":"bottom"}`))
+
+	if got := d.currentForScreen("kitchen"); got.Kind != "markdown" || got.Payload != "<h1>x</h1>" {
+		t.Fatalf("content changed after scroll: %+v", got)
+	}
+}
+
+// pushScreenCommand is lossy, not blocking: a full buffer drops rather than stalls,
+// so a burst of scrolls can't wedge the relay-frame path.
+func TestPushScreenCommand_DropsWhenFull(t *testing.T) {
+	d := newDisplayServer()
+	cmdCh := d.subscribeCmd("kitchen")
+	defer d.unsubscribeCmd("kitchen", cmdCh)
+
+	// Buffer is 8; pushing many more must return promptly without a reader draining.
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			d.pushScreenCommand("kitchen", screenCommand{Cmd: "scroll", Dir: "down"})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pushScreenCommand blocked on a full buffer")
+	}
+}

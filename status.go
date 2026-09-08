@@ -137,9 +137,14 @@ func printThisHostSection(out *os.File, ident *ipcResponse, instances []instance
 	// visible here instead of only in the daemon log.
 	if ident.DisplayError != "" {
 		fmt.Fprintf(out, "  display: ! FAILED to serve on %s — %s\n", ident.DisplayBind, ident.DisplayError)
-		fmt.Fprintf(out, "           set a different `display_bind` in ~/.hearth/credentials and restart\n")
+		fmt.Fprintf(out, "           free a port or set a lower `display_bind` in ~/.hearth/credentials and restart\n")
 	} else if ident.DisplayActive {
 		fmt.Fprintf(out, "  display: serving on %s\n", ident.DisplayBind)
+		// The bind host is usually 0.0.0.0 (not browser-loadable); show the concrete
+		// LAN URL(s) to open on a phone or wall tablet to pair a new screen.
+		for _, u := range ident.DisplayPairURLs {
+			fmt.Fprintf(out, "           pair a screen at: %s\n", u)
+		}
 	}
 
 	if len(instances) == 0 {

@@ -98,12 +98,28 @@ type screenState struct {
 	// (never sent on) by evictScreen when this screen drops from a display_screens
 	// push, so the /ws/screen handler tears the socket down (§B3).
 	evicts map[chan struct{}]struct{}
+	// cmdSubs are per-connection EPHEMERAL command channels (scroll). Unlike subs —
+	// which signal "re-pull the current assignment" — a command is a transient
+	// action on already-shown content, so it rides its own channel and never touches
+	// stored state. Buffered + drop-on-full: a scroll is best-effort.
+	cmdSubs map[chan screenCommand]struct{}
+}
+
+// screenCommand is an ephemeral action forwarded to a screen's live browsers
+// (currently only "scroll"). It changes nothing persisted — a reconnect or content
+// replace starts fresh at the top.
+type screenCommand struct {
+	Cmd    string `json:"cmd"`
+	To     string `json:"to,omitempty"`
+	Dir    string `json:"dir,omitempty"`
+	Amount string `json:"amount,omitempty"`
 }
 
 func newScreenState() *screenState {
 	return &screenState{
-		subs:   make(map[chan struct{}]struct{}),
-		evicts: make(map[chan struct{}]struct{}),
+		subs:    make(map[chan struct{}]struct{}),
+		evicts:  make(map[chan struct{}]struct{}),
+		cmdSubs: make(map[chan screenCommand]struct{}),
 	}
 }
 
@@ -137,6 +153,14 @@ type displayServer struct {
 	// relayWS below; in unified mode the daemon sets it to its own DaemonWS.
 	relayTx displayTransport
 	relayWS *WSClient // standalone-owned /ws/daemon client (nil in unified mode)
+	// bindAddr is the LAN address the HTTP server actually bound (after any port
+	// hunting), e.g. "0.0.0.0:8091". pairingURLs are the browser-loadable URLs
+	// derived from it (one per private LAN IPv4). Both are set once at serve time,
+	// before any report goroutine reads them, and are advertised to the relay in the
+	// host-level pairing block of display_state so the app can show which URL to open
+	// to pair a new screen.
+	bindAddr    string
+	pairingURLs []string
 }
 
 // screenCred is one bound screen as the relay reports it — enough to validate a
@@ -318,6 +342,47 @@ func (d *displayServer) subscribeToScreen(id string) chan struct{} {
 	return ch
 }
 
+// subscribeCmd / unsubscribeCmd register a browser's ephemeral-command channel for
+// ONE screen, mirroring subscribeToScreen. Buffered so pushScreenCommand never
+// blocks the relay-frame path on a slow socket.
+func (d *displayServer) subscribeCmd(id string) chan screenCommand {
+	ch := make(chan screenCommand, 8)
+	d.mu.Lock()
+	d.stateLocked(d.screenKey(id)).cmdSubs[ch] = struct{}{}
+	d.mu.Unlock()
+	return ch
+}
+
+func (d *displayServer) unsubscribeCmd(id string, ch chan screenCommand) {
+	d.mu.Lock()
+	if st := d.screens[d.screenKey(id)]; st != nil {
+		delete(st.cmdSubs, ch)
+	}
+	d.mu.Unlock()
+}
+
+// pushScreenCommand fans an ephemeral command out to the live browsers on one
+// screen. Non-blocking and lossy: if a connection's buffer is full the command is
+// dropped rather than stalling the caller (a stale scroll is not worth blocking a
+// relay frame for). No reportState — this changes nothing the relay caches.
+func (d *displayServer) pushScreenCommand(id string, cmd screenCommand) {
+	d.mu.Lock()
+	var subs []chan screenCommand
+	if st := d.screens[d.screenKey(id)]; st != nil {
+		subs = make([]chan screenCommand, 0, len(st.cmdSubs))
+		for ch := range st.cmdSubs {
+			subs = append(subs, ch)
+		}
+	}
+	d.mu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- cmd:
+		default: // buffer full — drop; scroll is best-effort
+		}
+	}
+}
+
 func (d *displayServer) unsubscribe(ch chan struct{}) { d.unsubscribeFromScreen("", ch) }
 
 func (d *displayServer) unsubscribeFromScreen(id string, ch chan struct{}) {
@@ -419,6 +484,7 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 	d.cancelReap(screenID)
 
 	ch := d.subscribeToScreen(screenID)
+	cmdCh := d.subscribeCmd(screenID)
 	// Registered before the unsubscribe below, so it runs AFTER it (defers are LIFO)
 	// — subs is already decremented when we check whether this was the last browser.
 	defer func() {
@@ -426,6 +492,7 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 			d.scheduleReap(screenID)
 		}
 	}()
+	defer d.unsubscribeCmd(screenID, cmdCh)
 	defer d.unsubscribeFromScreen(screenID, ch)
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -442,6 +509,16 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-ch:
 			if err := send(); err != nil {
+				return
+			}
+		case cmd := <-cmdCh:
+			// Ephemeral command (scroll): forward it as-is; the kiosk acts on its own
+			// content. Never mutates the assignment, so no re-send/re-pull is needed.
+			b, _ := json.Marshal(map[string]interface{}{"type": "scroll", "to": cmd.To, "dir": cmd.Dir, "amount": cmd.Amount})
+			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := conn.Write(wctx, websocket.MessageText, b)
+			cancel()
+			if err != nil {
 				return
 			}
 		case <-ticker.C:
@@ -467,6 +544,9 @@ func runDisplay(args []string) {
 		case "query":
 			runDisplayQuery(args[1:])
 			return
+		case "scroll":
+			runDisplayScroll(args[1:])
+			return
 		case "list", "ls":
 			runDisplayList(args[1:])
 			return
@@ -476,6 +556,7 @@ func runDisplay(args []string) {
 				"       hearth display publish <url> --target <screen-id> [--type url|image|video] [--ttl <seconds>]\n"+
 				"       hearth display publish --target <screen-id> --type markdown --file <path> [--ttl <seconds>]\n"+
 				"       hearth display query --target <screen-id>\n"+
+				"       hearth display scroll <up|down|top|bottom> --target <screen-id> [--amount page|half]\n"+
 				"       hearth display clear --target <screen-id>\n"+
 				"       hearth display show <url> [--ttl <seconds>]   (local: this box's screen)\n"+
 				"       hearth display clear                          (local: this box's screen)\n\n"+
@@ -526,12 +607,26 @@ func runDisplayServe(args []string) {
 	// the kiosk claims itself via /screen/pair and holds its own credential, so the
 	// daemon no longer auto-pairs one fixed screen at startup.
 
+	// Bind up front, hunting past a busy port so a second display server on this box
+	// starts instead of failing. Standalone doesn't persist the landed port (it's an
+	// ad-hoc foreground run) — the unified daemon path does.
+	ln, actual, err := listenDisplayLAN(*bind)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hearth display: %v\n", err)
+		os.Exit(1)
+	}
+	if actual != *bind {
+		fmt.Fprintf(os.Stderr, "hearth display: %s in use — serving on %s instead\n", *bind, actual)
+	}
+	d.bindAddr = actual
+	d.pairingURLs = displayPairingURLs(actual)
+
 	// Standalone: own the relay client (dial + reconnect + attach as transport).
 	// The unified daemon attaches its OWN /ws/daemon connection instead — see
 	// (*Daemon).startDisplaySubsystem — so serve() below stays transport-agnostic.
 	go d.connectRelay()
 
-	stop, err := d.serve(*bind)
+	stop, err := d.serve(ln)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hearth display: %v\n", err)
 		os.Exit(1)
@@ -549,7 +644,12 @@ func runDisplayServe(args []string) {
 // heartbeat, and returns a stop func. It is non-blocking and transport-agnostic:
 // the relay link is attached separately (connectRelay for standalone, attachTransport
 // for the unified daemon), so both entry points share this serving core.
-func (d *displayServer) serve(bind string) (func(), error) {
+//
+// The LAN socket is bound by the caller (listenDisplayLAN) and passed in, so a port
+// collision is caught up front — with port hunting — rather than surfacing as an
+// async error inside http.Server after this returns.
+func (d *displayServer) serve(ln net.Listener) (func(), error) {
+	bind := ln.Addr().String()
 	mux := http.NewServeMux()
 	mux.Handle("/", kioskHandler())
 	mux.HandleFunc("/ws/screen", d.handleScreenWS)
@@ -559,7 +659,7 @@ func (d *displayServer) serve(bind string) (func(), error) {
 	mux.HandleFunc("/screen/pair", d.handleScreenPair)
 	mux.HandleFunc("/screen/pair/poll", d.handleScreenPairPoll)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintln(w, "ok") })
-	srv := &http.Server{Addr: bind, Handler: mux}
+	srv := &http.Server{Handler: mux}
 
 	// Local control socket — a unix socket, not an HTTP route: the HTTP server
 	// binds the LAN, and publish control must be local-only, never "publish this"
@@ -590,7 +690,7 @@ func (d *displayServer) serve(bind string) (func(), error) {
 	}()
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "hearth display: %v\n", err)
 		}
 	}()
@@ -855,6 +955,45 @@ func runDisplayPublish(args []string) {
 		os.Exit(1)
 	}
 	sendDisplayRequest("display_publish", payload, "published to "+*target)
+}
+
+// runDisplayScroll scrolls what a screen is already showing, without republishing —
+// the hands-free companion to publish. A voice caller says "scroll down" / "back to
+// the top" and the agent maps it to a direction here. The direction is a leading
+// positional (up | down | top | bottom); up/down move one page by default (--amount
+// half for a gentler nudge). Scroll bites on markdown and inline HTML (which the
+// kiosk can script); on a plain url page it's a harmless no-op — capture the page as
+// markdown/html if it needs to scroll.
+func runDisplayScroll(args []string) {
+	const usage = "Usage: hearth display scroll <up|down|top|bottom> --target <screen-id> [--amount page|half]\n" +
+		"       up/down move one page (--amount half for a smaller step); top/bottom jump.\n" +
+		"       Run `hearth display list` for screen ids."
+	// Leading positional direction, like publish's leading URL.
+	var dir string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		dir = args[0]
+		args = args[1:]
+	}
+	fs := flag.NewFlagSet("display scroll", flag.ExitOnError)
+	target := fs.String("target", "", "screen id to scroll (from `hearth display list`)")
+	amount := fs.String("amount", "page", "how far up/down: page | half (ignored for top/bottom)")
+	fs.Parse(args)
+	if *target == "" {
+		fmt.Fprintln(os.Stderr, "hearth: --target <screen> required\n"+usage)
+		os.Exit(1)
+	}
+	payload := map[string]interface{}{"target": *target}
+	switch dir {
+	case "top", "bottom":
+		payload["to"] = dir
+	case "up", "down":
+		payload["dir"] = dir
+		payload["amount"] = *amount
+	default:
+		fmt.Fprintln(os.Stderr, "hearth: scroll direction must be up, down, top, or bottom\n"+usage)
+		os.Exit(1)
+	}
+	sendDisplayRequest("display_scroll", payload, "scrolled "+*target)
 }
 
 // runDisplayQuery asks the relay what's currently on a named screen — the read

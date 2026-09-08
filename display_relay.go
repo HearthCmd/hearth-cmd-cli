@@ -62,6 +62,9 @@ func (d *displayServer) handleRelayFrame(data []byte) bool {
 		Markdown   string              `json:"markdown"`
 		HTML       string              `json:"html"`
 		TTLSeconds int                 `json:"ttl_seconds"`
+		To         string              `json:"to"`
+		Dir        string              `json:"dir"`
+		Amount     string              `json:"amount"`
 		Screens    []displayScreenInfo `json:"screens"`
 	}
 	if json.Unmarshal(data, &msg) != nil {
@@ -73,6 +76,10 @@ func (d *displayServer) handleRelayFrame(data []byte) bool {
 		// empty screen_id, or this box's own screen, collapses onto the primary
 		// screen (screenKey), so a single-screen box is unchanged.
 		_ = d.applyControlForScreen(msg.ScreenID, controlCommand{Cmd: msg.Cmd, Kind: msg.Kind, URL: msg.URL, Markdown: msg.Markdown, HTML: msg.HTML, TTLSeconds: msg.TTLSeconds})
+		return true
+	case "display_scroll":
+		// Ephemeral: forward to the screen's live browsers, don't touch stored content.
+		d.pushScreenCommand(msg.ScreenID, screenCommand{Cmd: msg.Cmd, To: msg.To, Dir: msg.Dir, Amount: msg.Amount})
 		return true
 	case "display_screens":
 		// The relay's authoritative set of screens bound to this host (§B3): cache it
@@ -117,7 +124,15 @@ func (d *displayServer) displayStateReport() map[string]interface{} {
 		}
 		screens = append(screens, entry)
 	}
-	return map[string]interface{}{"type": "display_state", "data": map[string]interface{}{"screens": screens}}
+	data := map[string]interface{}{"screens": screens}
+	// Host-level pairing endpoint: which LAN URL(s) to open in a browser to pair a new
+	// screen with this household. Computed once at serve time (d.bindAddr/pairingURLs),
+	// so this stays a pure function of the struct — reported even with zero screens so a
+	// user can pair the FIRST browser.
+	if d.bindAddr != "" {
+		data["pairing"] = map[string]interface{}{"bind": d.bindAddr, "urls": d.pairingURLs}
+	}
+	return map[string]interface{}{"type": "display_state", "data": data}
 }
 
 // reportState pushes the per-screen content to the relay over the daemon WS. No-op
