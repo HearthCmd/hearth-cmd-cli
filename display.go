@@ -663,14 +663,20 @@ func (d *displayServer) serve(ln net.Listener) (func(), error) {
 
 	// Local control socket — a unix socket, not an HTTP route: the HTTP server
 	// binds the LAN, and publish control must be local-only, never "publish this"
-	// from anyone on the network.
+	// from anyone on the network. It gets its OWN listener variable — NOT ln, which
+	// is the HTTP listener srv.Serve needs below (reusing ln here silently served the
+	// kiosk over the unix socket and left the TCP port unserved). Non-fatal: if it
+	// can't bind, only the local `hearth display show/clear` convenience is lost —
+	// browser serving and the relay path don't use it and keep running.
 	sockPath := displayControlSockPath()
 	_ = os.Remove(sockPath)
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, fmt.Errorf("control socket: %w", err)
+	var ctlLn net.Listener
+	if cl, err := net.Listen("unix", sockPath); err != nil {
+		fmt.Fprintf(os.Stderr, "hearth display: local control socket unavailable (%v) — `hearth display show/clear` disabled on this host; browser serving is unaffected\n", err)
+	} else {
+		ctlLn = cl
+		go d.serveControl(ctlLn)
 	}
-	go d.serveControl(ln)
 
 	// Heartbeat the current content to the relay so display.query answers from
 	// cache and a relay restart re-warms within one interval. Change-driven reports
@@ -698,11 +704,13 @@ func (d *displayServer) serve(ln net.Listener) (func(), error) {
 
 	return func() {
 		close(hbStop)
-		ln.Close()
-		_ = os.Remove(sockPath)
+		if ctlLn != nil {
+			ctlLn.Close()
+			_ = os.Remove(sockPath)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(ctx)
+		_ = srv.Shutdown(ctx) // closes the HTTP listener (ln) it's serving
 	}, nil
 }
 
@@ -723,9 +731,12 @@ type controlReply struct {
 }
 
 // displayControlSockPath is the local-only socket the running display server
-// listens on and `hearth display show`/`clear` dial.
+// listens on and `hearth display show`/`clear` dial. Per-uid (like the daemon IPC
+// socket, hearth-daemon-<uid>.sock) so several display daemons can share a box —
+// a fixed path collided in a shared /tmp, and the sticky bit blocks removing
+// another account's file, so the second display host could never bind it.
 func displayControlSockPath() string {
-	return filepath.Join(os.TempDir(), "hearth-display.sock")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("hearth-display-%d.sock", os.Getuid()))
 }
 
 // applyControl mutates THIS box's primary screen per a control command (the local

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -99,5 +103,41 @@ func TestDisplayStateReport_NoPairingWhenUnbound(t *testing.T) {
 	data := d.displayStateReport()["data"].(map[string]interface{})
 	if _, ok := data["pairing"]; ok {
 		t.Fatalf("unexpected pairing block for an unbound server: %v", data)
+	}
+}
+
+// Regression: a variable-reuse bug (`ln, err := net.Listen("unix", …)` reassigned
+// the HTTP listener param) made srv.Serve run over the unix control socket, leaving
+// the kiosk's TCP port unserved. This pins that the kiosk actually answers on the
+// bound TCP listener.
+func TestServe_ServesKioskOnTCPListener(t *testing.T) {
+	ln, addr, err := listenDisplayLAN("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listenDisplayLAN: %v", err)
+	}
+	d := newDisplayServer()
+	stop, err := d.serve(ln)
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	defer stop()
+
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v — kiosk HTTP not served on the TCP listener", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || strings.TrimSpace(string(body)) != "ok" {
+		t.Fatalf("/healthz = %d %q, want 200 \"ok\"", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+}
+
+// The control socket is per-uid so several display daemons can share one box (a
+// fixed path collided in a shared /tmp, unremovable under the sticky bit).
+func TestDisplayControlSockPath_PerUID(t *testing.T) {
+	want := fmt.Sprintf("hearth-display-%d.sock", os.Getuid())
+	if got := displayControlSockPath(); !strings.HasSuffix(got, want) {
+		t.Fatalf("control sock path = %q, want suffix %q", got, want)
 	}
 }
