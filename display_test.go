@@ -140,7 +140,8 @@ func TestRandomSecret(t *testing.T) {
 }
 
 // startDisplayPairing authenticates as the host (Bearer + ?host_id=) and sends
-// form_factor=display, then returns the minted code.
+// form_factor=display, then returns the minted code plus the serving household/host
+// the relay reports (shown on the kiosk pairing screen).
 func TestStartDisplayPairing(t *testing.T) {
 	var gotHostID, gotAuth, gotFormFactor string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,16 +150,19 @@ func TestStartDisplayPairing(t *testing.T) {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		gotFormFactor = body["form_factor"]
-		_, _ = w.Write([]byte(`{"code":"123456"}`))
+		_, _ = w.Write([]byte(`{"code":"123456","serving_household":"Ganado","serving_host":"scullery"}`))
 	}))
 	defer srv.Close()
 
-	code, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef", false)
+	start, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != "123456" {
-		t.Fatalf("code = %q, want 123456", code)
+	if start.Code != "123456" {
+		t.Fatalf("code = %q, want 123456", start.Code)
+	}
+	if start.Household != "Ganado" || start.Host != "scullery" {
+		t.Errorf("serving identity = %q / %q, want Ganado / scullery", start.Household, start.Host)
 	}
 	if gotHostID != "host-1" {
 		t.Errorf("host_id query = %q, want host-1", gotHostID)

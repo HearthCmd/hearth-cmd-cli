@@ -139,6 +139,36 @@ func TestRouteControlFrame_AnnounceSatelliteNilFuncIsSilent(t *testing.T) {
 	d.routeControlFrame([]byte(`{"type":"announce_satellite","ai_agent_instance_id":"a","connection":"ha","entity_id":"e","message":"m"}`))
 }
 
+// The one that actually mattered. The relay sends announce_satellite as a TEXT
+// WriteJSON frame (like sleep/wake/cycle), so it arrives at handleTextFrame, NOT
+// the binary control path. Unless handleTextFrame FORWARDS it to routeControlFrame,
+// the frame carries an ai_agent_instance_id, matches no PTY-inject target, and is
+// dropped at "has no text/data field" — which is exactly how every spoken voice
+// reply silently vanished. The earlier announce tests called routeControlFrame
+// directly and so never caught this; this one goes through the real entry point.
+func TestHandleTextFrame_AnnounceSatelliteReachesTheHandler(t *testing.T) {
+	d := newTestDaemonWS()
+	ch := make(chan announceCall, 1)
+	d.announceSatelliteFunc = func(agent, conn, entity, msg string, listen bool) {
+		ch <- announceCall{agent, conn, entity, msg, listen}
+	}
+
+	consumed := d.handleTextFrame([]byte(`{"type":"announce_satellite","ai_agent_instance_id":"agent-9",` +
+		`"connection":"ha","entity_id":"assist_satellite.kitchen","message":"There's your banana, on the kitchen screen.","listen":false}`))
+	if !consumed {
+		t.Fatal("handleTextFrame did not consume announce_satellite — it fell through to the PTY-inject path and would be dropped")
+	}
+	select {
+	case got := <-ch:
+		want := announceCall{"agent-9", "ha", "assist_satellite.kitchen", "There's your banana, on the kitchen screen.", false}
+		if got != want {
+			t.Errorf("announceSatelliteFunc got %+v, want %+v", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("announce_satellite text frame never reached announceSatelliteFunc (not forwarded to routeControlFrame)")
+	}
+}
+
 func TestRouteControlFrame_SleepNoCallbackIsSilent(t *testing.T) {
 	d := newTestDaemonWS()
 	// sleepFunc nil — must not panic.

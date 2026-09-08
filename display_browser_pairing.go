@@ -106,17 +106,26 @@ func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request)
 		writeScreenJSON(w, map[string]interface{}{"error": "display server not enrolled"})
 		return
 	}
-	code, err := startDisplayPairing(baseURL, hostID, hostSecret, body.IODeviceID, sha256Hex([]byte(body.Secret)), body.IsTemp)
+	start, err := startDisplayPairing(baseURL, hostID, hostSecret, body.IODeviceID, sha256Hex([]byte(body.Secret)), body.IsTemp)
 	if err != nil {
 		writeScreenJSON(w, map[string]interface{}{"error": "pairing start failed"})
 		return
 	}
-	resp := map[string]interface{}{"code": code}
+	resp := map[string]interface{}{"code": start.Code}
+	// Which household + computer this screen will join — shown on the kiosk pairing
+	// page so it's clear before a phone claims it (a box may run several display
+	// servers). Sourced from the host's own org by the relay.
+	if start.Household != "" {
+		resp["serving_household"] = start.Household
+	}
+	if start.Host != "" {
+		resp["serving_host"] = start.Host
+	}
 	// A scan-to-claim deep link the kiosk renders as a QR: opens the app straight to
 	// claiming this code. Omitted when the app base can't be derived (e.g. localhost),
 	// in which case the kiosk just shows the code.
 	if appBase := appBaseURL(); appBase != "" {
-		resp["claim_url"] = appBase + "/pair?code=" + url.QueryEscape(code)
+		resp["claim_url"] = appBase + "/pair?code=" + url.QueryEscape(start.Code)
 	}
 	writeScreenJSON(w, resp)
 }
