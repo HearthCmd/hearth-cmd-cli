@@ -641,7 +641,7 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	// frame fell through to the PTY-inject path and was dropped at the
 	// "no text/data field" check.)
 	switch msg.Type {
-	case "sleep", "wake", "cycle", "transcript_history_request", "retire_agent_instance", "destroy_agent_instance":
+	case "sleep", "wake", "cycle", "transcript_history_request", "retire_agent_instance", "destroy_agent_instance", "announce_satellite":
 		d.routeControlFrame(data)
 		return true
 	case "agent_approval_request":

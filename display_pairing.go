@@ -27,7 +27,16 @@ func randomSecret() string {
 // startDisplayPairing POSTs /pair/start authenticated as the host (Bearer
 // host_secret + ?host_id=…) so the pending pairing records serving_host_id.
 // Returns the short code for the homeowner to type into their phone.
-func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string, isTemp bool) (string, error) {
+// displayPairingStart is the relay's /pair/start result: the code plus, for a
+// host-authed display pairing, which household + computer this screen will join
+// (shown on the kiosk pairing page so a screen isn't paired into the wrong home).
+type displayPairingStart struct {
+	Code      string
+	Household string
+	Host      string
+}
+
+func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string, isTemp bool) (displayPairingStart, error) {
 	payload := map[string]interface{}{
 		"io_device_id": screenID,
 		"form_factor":  "display",
@@ -38,7 +47,7 @@ func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash strin
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", baseURL+"/pair/start?host_id="+url.QueryEscape(hostID), bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return displayPairingStart{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+hostSecret)
@@ -46,22 +55,24 @@ func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash strin
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return "", err
+		return displayPairingStart{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("pair/start HTTP %d", resp.StatusCode)
+		return displayPairingStart{}, fmt.Errorf("pair/start HTTP %d", resp.StatusCode)
 	}
 	var r struct {
-		Code string `json:"code"`
+		Code             string `json:"code"`
+		ServingHousehold string `json:"serving_household"`
+		ServingHost      string `json:"serving_host"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", err
+		return displayPairingStart{}, err
 	}
 	if r.Code == "" {
-		return "", fmt.Errorf("pair/start returned no code")
+		return displayPairingStart{}, fmt.Errorf("pair/start returned no code")
 	}
-	return r.Code, nil
+	return displayPairingStart{Code: r.Code, Household: r.ServingHousehold, Host: r.ServingHost}, nil
 }
 
 // pollDisplayPairing POSTs /pair/poll and returns the pairing status
