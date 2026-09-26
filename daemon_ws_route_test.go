@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -307,11 +308,24 @@ func TestHandleTextFrame_NoInstanceIDFallsThrough(t *testing.T) {
 	}
 }
 
-func TestHandleTextFrame_UnknownInstanceIDFallsThrough(t *testing.T) {
+// A frame for an instance that isn't registered yet is held, not dropped: the
+// relay learns of a new instance before the daemon wires its input, so a
+// just-spawned agent's first turn (a chat helper's brief) arrives in that
+// window. It is delivered once the instance registers.
+func TestHandleTextFrame_UnknownInstanceWaitsForSpawn(t *testing.T) {
 	d := newTestDaemonWS()
-	// Has ai_agent_instance_id but no matching registered instance.
-	if d.handleTextFrame([]byte(`{"type":"input","ai_agent_instance_id":"ghost","text":"aGk="}`)) {
-		t.Error("should return false for unregistered instance")
+	if !d.handleTextFrame([]byte(`{"type":"input","ai_agent_instance_id":"late","text":"aGk="}`)) {
+		t.Fatal("a frame for a not-yet-registered instance should be held (consumed)")
+	}
+	got := make(chan []byte, 4)
+	d.RegisterAgentInstance("late", func(b []byte) error { got <- append([]byte(nil), b...); return nil }, func() {})
+	select {
+	case b := <-got:
+		if !strings.Contains(string(b), "hi") {
+			t.Fatalf("delivered %q, want the held text", b)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("held frame was never delivered after the instance registered")
 	}
 }
 

@@ -154,6 +154,13 @@ func (r *agentReadiness) availableLocked(now time.Time) bool {
 	return now.Sub(r.lastTurnEnd) >= settleAfterTurn
 }
 
+// TurnEndedSince reports whether a turn has completed after t.
+func (r *agentReadiness) TurnEndedSince(t time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sawTurnEnd && r.lastTurnEnd.After(t)
+}
+
 // SetHold sets or clears deliberate unavailability. Nothing calls this with
 // holdBreak yet — see docs/agent-inbox-spec.md §7.
 func (r *agentReadiness) SetHold(h holdReason) {

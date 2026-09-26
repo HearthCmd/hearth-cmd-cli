@@ -659,8 +659,15 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 	aw := d.instances[msg.AIAgentInstanceID]
 	d.mu.RUnlock()
 	if aw == nil || aw.injectFunc == nil {
-		log.Printf("daemon-ws: text frame for unknown agent instance %s", msg.AIAgentInstanceID)
-		return false
+		if msg.AIAgentInstanceID == "" {
+			log.Printf("daemon-ws: text frame without an agent instance")
+			return false
+		}
+		// Possibly still spawning: the relay learns of an instance before the
+		// daemon has wired its input, so the first turn for a just-spawned agent
+		// (a chat helper's brief, a voice turn to a woken agent) lands here.
+		d.retryWhenLive(msg.AIAgentInstanceID, "text frame", func() { d.handleTextFrame(data) })
+		return true
 	}
 
 	// Extract text content — server may use "text" or "data" field.
@@ -814,8 +821,10 @@ func (d *DaemonWS) routeChatMention(raw []byte, agentInstanceID string) bool {
 		return true
 	}
 	var frame struct {
-		RoomID  string `json:"room_id"`
-		Message struct {
+		RoomID string `json:"room_id"`
+		// Set when the agent was woken from a thread (relay chat_threads.go).
+		ThreadRootID string `json:"thread_root_id"`
+		Message      struct {
 			SenderName string `json:"sender_name"`
 			Text       string `json:"text"`
 		} `json:"message"`
@@ -834,11 +843,13 @@ func (d *DaemonWS) routeChatMention(raw []byte, agentInstanceID string) bool {
 	aw := d.instances[agentInstanceID]
 	d.mu.RUnlock()
 	if aw == nil || aw.injectFunc == nil {
-		log.Printf("daemon-ws: chat_mention: no live instance for %s; dropping", agentInstanceID)
+		// Possibly still spawning (registered with the relay before its input
+		// path is wired): wait for it rather than drop the mention.
+		d.retryWhenLive(agentInstanceID, "chat_mention", func() { d.routeChatMention(raw, agentInstanceID) })
 		return true
 	}
 
-	prompt := buildChatMentionPrompt(frame.RoomID, frame.Message.SenderName, frame.Message.Text, func() []string {
+	prompt := buildChatMentionPrompt(frame.RoomID, frame.ThreadRootID, frame.Message.SenderName, frame.Message.Text, func() []string {
 		lines := make([]string, 0, len(frame.Context))
 		for _, c := range frame.Context {
 			lines = append(lines, fmt.Sprintf("[%s]: %s", c.SenderName, c.Text))
@@ -948,27 +959,70 @@ func (d *DaemonWS) deliverTurn(id string, prompt []byte, source string, ttl time
 	return true
 }
 
-func buildChatMentionPrompt(roomID, senderName, text string, contextLines []string) []byte {
+// buildChatMentionPrompt is the turn an agent receives when it's mentioned (or
+// replied to) in a household chat room. threadRootID is set when that happened
+// inside a Slack-style thread: the context is then the thread, and the agent is
+// told to reply in it with --thread (explicit, so the reply lands there however
+// long it takes to answer), or to post to the main room with --channel.
+func buildChatMentionPrompt(roomID, threadRootID, senderName, text string, contextLines []string) []byte {
 	// Wrap in a hearth/1 envelope so the phone's transcript renderer can
 	// suppress this injected context — it's agent scaffolding, not a real
 	// user message. The agent still receives the full text unchanged.
+	inThread := threadRootID != ""
 	var body bytes.Buffer
 	if len(contextLines) > 0 {
-		body.WriteString("--- Recent org chat ---\n")
+		if inThread {
+			body.WriteString("--- This thread so far ---\n")
+		} else {
+			body.WriteString("--- Recent org chat ---\n")
+		}
 		for _, l := range contextLines {
 			body.WriteString(l)
 			body.WriteByte('\n')
 		}
 		body.WriteString("--- End context ---\n\n")
 	}
-	fmt.Fprintf(&body, "[Org Chat from %s]: %s\n\n", senderName, text)
-	fmt.Fprintf(&body, "To reply to the chat room, run:\n  hearth chat reply --room %s \"your response\"\n", roomID)
+	if inThread {
+		fmt.Fprintf(&body, "[Org Chat thread, from %s]: %s\n\n", senderName, text)
+		body.WriteString("This was said in a thread. To reply in the thread:\n\n")
+		body.WriteString(chatReplyHowTo(fmt.Sprintf("hearth chat reply --room %s --thread %s", roomID, threadRootID), newChatReplyMarker()))
+		body.WriteString("Only if your answer belongs in the main room instead, use --channel in place of --thread.\n")
+	} else {
+		fmt.Fprintf(&body, "[Org Chat from %s]: %s\n\n", senderName, text)
+		body.WriteString("To reply to the chat room:\n\n")
+		body.WriteString(chatReplyHowTo(fmt.Sprintf("hearth chat reply --room %s", roomID), newChatReplyMarker()))
+	}
 	body.WriteString("You may send multiple replies. Keep responses concise.")
 
 	var out bytes.Buffer
 	out.WriteString("hearth/1 {\"kind\":\"chat_context\"}\n\n")
 	out.Write(body.Bytes())
 	return out.Bytes()
+}
+
+// newChatReplyMarker returns a fresh heredoc marker for one chat turn. Random,
+// so no line of a real message can equal it by accident: a message line equal
+// to the marker would end the heredoc early, and the shell would run the lines
+// after it as commands.
+func newChatReplyMarker() string {
+	return "HEARTH_MSG_" + strings.ToUpper(strings.ReplaceAll(generateUUID(), "-", "")[:8])
+}
+
+// chatReplyHowTo teaches the safe way to post: the message on stdin through a
+// quoted heredoc, which the shell passes through untouched — never expanded,
+// never run (docs/agent-chat-message-transport.md). The example is flush-left
+// on purpose: an agent that copies an indented terminator line never closes
+// the heredoc. The host hook auto-allows exactly this shape (isChatReplyHeredoc).
+func chatReplyHowTo(command, marker string) string {
+	return "Run this as ONE Bash call, in the foreground, exactly in this shape. Put your message between " +
+		"the two marker lines exactly as you want it to appear: any length, any characters, markdown welcome.\n\n" +
+		command + " <<'" + marker + "'\n" +
+		"your message\n" +
+		marker + "\n\n" +
+		"Rules: keep the single quotes around the first " + marker + " (without them the shell would expand " +
+		"and run parts of your message); don't quote or escape anything inside the message; never write the " +
+		"line " + marker + " inside your message; put the closing " + marker + " alone on its own line with no " +
+		"spaces before it; and don't pass the message as a quoted argument instead.\n"
 }
 
 // buildApprovalPrompt formats the structured prompt the agent reads

@@ -110,6 +110,10 @@ type ipcRequest struct {
 	ChatRoomID          string `json:"chat_room_id,omitempty"`
 	ChatAgentInstanceID string `json:"chat_agent_instance_id,omitempty"`
 	ChatText            string `json:"chat_text,omitempty"`
+	// chat reply --thread / --channel (Slack-style threads). Both empty = let
+	// the server place the reply where the agent was asked.
+	ChatThreadRootID string `json:"chat_thread_root_id,omitempty"`
+	ChatChannel      bool   `json:"chat_channel,omitempty"`
 
 	// Voice handoff fields — used by `hearth voice handoff` to transfer the
 	// calling agent's voice conversation to another household agent (V4).
@@ -1178,6 +1182,11 @@ func (d *Daemon) buildDaemonWSURL() (string, error) {
 	// these. See client_header.go and
 	// hearth-cmd/docs/forward-compat-version-handshake.md.
 	addClientQuery(q)
+	// What this daemon can do that older ones can't, so the relay can tailor
+	// what it tells agents here (e.g. only teach the stdin chat reply to hosts
+	// whose `hearth chat reply` reads stdin). Comma-separated; the relay
+	// ignores names it doesn't know.
+	q.Set("caps", daemonCapabilities)
 	// Pass the daemon's io_device_id so server-side pushes that depend on
 	// "current org" (organizations_list, …) can compute IsCurrent the same
 	// way they do for the phone /ws path. Optional — the server falls
@@ -1631,11 +1640,7 @@ func (d *Daemon) handleChatReply(conn net.Conn, req ipcRequest) {
 		sendControl(conn, ipcResponse{Type: "error", Message: "chat_room_id, chat_agent_instance_id, and text required"})
 		return
 	}
-	payload, err := json.Marshal(map[string]interface{}{
-		"room_id":              req.ChatRoomID,
-		"ai_agent_instance_id": req.ChatAgentInstanceID,
-		"text":                 req.ChatText,
-	})
+	payload, err := json.Marshal(chatReplyPayload(req))
 	if err != nil {
 		sendControl(conn, ipcResponse{Type: "error", Message: err.Error()})
 		return
@@ -1646,6 +1651,24 @@ func (d *Daemon) handleChatReply(conn net.Conn, req ipcRequest) {
 		WSData:    json.RawMessage(payload),
 	}
 	d.handleWSRequest(conn, innerReq)
+}
+
+// chatReplyPayload is the send_chat_message body for an agent's chat reply.
+// thread_root_id / channel are sent only when the agent asked for them; with
+// neither, the relay places the reply where the agent was asked (in the thread
+// it was woken from, if recent). A relay predating threads ignores both.
+func chatReplyPayload(req ipcRequest) map[string]interface{} {
+	p := map[string]interface{}{
+		"room_id":              req.ChatRoomID,
+		"ai_agent_instance_id": req.ChatAgentInstanceID,
+		"text":                 req.ChatText,
+	}
+	if req.ChatThreadRootID != "" {
+		p["thread_root_id"] = req.ChatThreadRootID
+	} else if req.ChatChannel {
+		p["channel"] = true
+	}
+	return p
 }
 
 // handleVoiceHandoff forwards an agent's voice-handoff request to the server via

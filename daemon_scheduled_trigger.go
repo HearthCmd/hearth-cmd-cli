@@ -279,6 +279,8 @@ func (d *Daemon) handleInboxResolved(e *inboxEntry, outcome string) {
 	// so the sender's transcript row stops claiming it is on its way. Runs
 	// before the trigger branch because it applies to all sources.
 	d.reportUndeliverable(e, outcome)
+	// A quick helper's brief landing starts its turn watcher (daemon_chat_helper.go).
+	d.onChatHelperBriefResolved(e, outcome)
 
 	if !strings.HasPrefix(e.Source, triggerSourcePrefix) {
 		return

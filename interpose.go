@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -134,8 +135,71 @@ func handleInterposeSock(listener net.Listener, agent string, ir *interposeRelay
 // prompting the user. A command is safe if its base binary is read-only
 // AND it contains no output redirects (which could write to files).
 func isSafeCommand(cmd string) bool {
+	// An agent posting a chat message the way it's taught. Recognized whole,
+	// so the message itself is never scanned (see isChatReplyHeredoc).
+	if isChatReplyHeredoc(cmd) {
+		return true
+	}
+
+	cmdName := commandName(cmd)
+	if cmdName == "" {
+		return false
+	}
+
+	// A hearth command carries text that must stay text — above all a chat
+	// message, where "$(…)" or a backtick in the words would run as a command.
+	// So it's auto-allowed only as the exact heredoc above, or as a single
+	// command in which bash expands nothing.
+	if chatReplyCommandNames[cmdName] {
+		return isPlainSimpleCommand(cmd)
+	}
+
 	// Check for output redirects: any unquoted > means the command can
 	// write to a file, even if the binary itself is read-only.
+	if mayRedirectOutput(cmd) {
+		return false
+	}
+	return isSafeProgram(cmdName)
+}
+
+// isSafeRequest decides auto-allow for one intercepted exec. A shell running a
+// script (-c) is judged on the script (isSafeCommand). Any other exec is a
+// program started with its final argv: no shell will read those arguments
+// again, so nothing in them can become a command. hearth itself is therefore
+// safe whatever its arguments (a chat message passed inline included). Other
+// programs keep the long-standing check, whose '>' scan also catches programs
+// that write files through their own syntax (awk '{print > "f"}').
+func isSafeRequest(req interposeRequest, cmd string) bool {
+	if req.Type != "spawn" || spawnRunsShellScript(req) {
+		return isSafeCommand(cmd)
+	}
+	prog := req.Path
+	if prog == "" && len(req.Args) > 0 {
+		prog = req.Args[0]
+	}
+	if i := strings.LastIndexByte(prog, '/'); i >= 0 {
+		prog = prog[i+1:]
+	}
+	if chatReplyCommandNames[prog] {
+		return true
+	}
+	return !legacyMayRedirect(cmd) && isSafeProgram(commandName(cmd))
+}
+
+// spawnRunsShellScript reports whether an exec passes a script with -c (the
+// same test translateInterposeRequest uses to pick the command it shows).
+func spawnRunsShellScript(req interposeRequest) bool {
+	for i, a := range req.Args {
+		if a == "-c" && i+1 < len(req.Args) {
+			return true
+		}
+	}
+	return false
+}
+
+// legacyMayRedirect is the original quote-aware '>' scan, kept exactly for
+// direct program execs (see isSafeRequest).
+func legacyMayRedirect(cmd string) bool {
 	inSingle := false
 	inDouble := false
 	for i := 0; i < len(cmd); i++ {
@@ -153,28 +217,30 @@ func isSafeCommand(cmd string) bool {
 			continue
 		}
 		if c == '>' && !inSingle && !inDouble {
-			return false
+			return true
 		}
 	}
+	return false
+}
 
-	// Extract the base command name (skip env assignments like VAR=val)
-	fields := strings.Fields(cmd)
-	cmdName := ""
-	for _, f := range fields {
+// commandName is the basename of the first word that isn't an env assignment
+// (VAR=val), or "".
+func commandName(cmd string) string {
+	for _, f := range strings.Fields(cmd) {
 		if strings.Contains(f, "=") && !strings.HasPrefix(f, "-") {
 			continue // env var assignment
 		}
-		cmdName = f
-		break
+		if idx := strings.LastIndex(f, "/"); idx >= 0 {
+			f = f[idx+1:]
+		}
+		return f
 	}
-	if cmdName == "" {
-		return false
-	}
-	// Use basename
-	if idx := strings.LastIndex(cmdName, "/"); idx >= 0 {
-		cmdName = cmdName[idx+1:]
-	}
+	return ""
+}
 
+// isSafeProgram reports whether a program is read-only (writes nothing without
+// a redirect).
+func isSafeProgram(cmdName string) bool {
 	// Read-only commands that cannot modify files without redirects
 	switch cmdName {
 	case "pwd", "echo", "printf", "wc", "ls", "cat", "head", "tail",
@@ -190,6 +256,351 @@ func isSafeCommand(cmd string) bool {
 		return true
 	}
 	return false
+}
+
+// mayRedirectOutput reports whether a shell command might write a file through
+// an output redirect (an unquoted '>'), or contains anything this scanner does
+// not model exactly as bash does. It errs toward true: a wrong true costs an
+// approval prompt, a wrong false could auto-allow a write.
+//
+// The invariant: text is only ever passed over as inert (quoted, or a
+// heredoc body) where bash is guaranteed to treat it as inert too. So the
+// scanner follows bash's quoting exactly for the constructs it accepts —
+// '...', "...", backslashes, $'...', $(...) (a fresh context, even inside
+// double quotes) and ${...} — and refuses everything whose parsing it doesn't
+// model: backticks, comments, heredocs, case (its unbalanced ')' would end a
+// $(...) early), arithmetic, a '(' glued to a word (a zsh glob qualifier can
+// run code), anything but plain forms inside ${...}, and anything unbalanced
+// or unterminated. It has to hold for zsh as well as bash: Codex runs
+// commands through zsh.
+//
+// Heredocs are always refused here. The one heredoc an agent is taught — a
+// chat message on stdin — is recognized, in full, by isChatReplyHeredoc before
+// this runs.
+func mayRedirectOutput(cmd string) bool {
+	end, bad := scanShell(cmd, 0, 0)
+	return bad || end != len(cmd)
+}
+
+// shellWordBreak holds the characters after which a new shell word starts.
+const shellWordBreak = " \t\n;&|()<>"
+
+// atWordStart reports whether position i begins a shell word.
+func atWordStart(s string, i int) bool {
+	return i == 0 || strings.IndexByte(shellWordBreak, s[i-1]) >= 0
+}
+
+// scanShell scans unquoted shell text from i: to the end when closer is 0, or
+// to the matching closer (')' for $(...), '}' for ${...}) at nesting depth 0,
+// returning that closer's index. bad reports a possible output redirect or an
+// unmodelled construct.
+func scanShell(s string, i int, closer byte) (int, bool) {
+	parens, braces := 0, 0
+	n := len(s)
+	for i < n {
+		c := s[i]
+		switch c {
+		case '\'':
+			k := strings.IndexByte(s[i+1:], '\'')
+			if k < 0 {
+				return i, true
+			}
+			i += k + 2
+			continue
+		case '"':
+			j, bad := scanDoubleQuoted(s, i+1)
+			if bad {
+				return i, true
+			}
+			i = j
+			continue
+		case '\\':
+			i += 2 // an escaped char (or a line continuation) is literal
+			continue
+		case '`':
+			return i, true
+		case '>':
+			return i, true
+		case '<':
+			if i+1 < n && s[i+1] == '<' {
+				if i+2 < n && s[i+2] == '<' {
+					i += 3 // here-string: its word is scanned like any other
+					continue
+				}
+				return i, true // a heredoc: never skipped here
+			}
+		case '#':
+			if atWordStart(s, i) {
+				return i, true // a comment
+			}
+		case 'c':
+			if atWordStart(s, i) && strings.HasPrefix(s[i:], "case") &&
+				(i+4 == n || strings.IndexByte(shellWordBreak, s[i+4]) >= 0) {
+				return i, true
+			}
+		case '$':
+			if i+1 < n {
+				switch s[i+1] {
+				case '\'':
+					j, ok := skipANSICQuoted(s, i+2)
+					if !ok {
+						return i, true
+					}
+					i = j
+					continue
+				case '(':
+					if i+2 < n && s[i+2] == '(' {
+						// $((…)): arithmetic, where quotes are not quoting.
+						return i, true
+					}
+					j, bad := scanShell(s, i+2, ')')
+					if bad {
+						return i, true
+					}
+					i = j + 1
+					continue
+				case '{':
+					j, bad := scanParamRestricted(s, i+2)
+					if bad {
+						return i, true
+					}
+					i = j + 1
+					continue
+				case '[':
+					return i, true // $[…]: old-style arithmetic
+				}
+			}
+		case '(':
+			if !atWordStart(s, i) {
+				// Glued to a word: in zsh a glob qualifier, which can run code
+				// (ls *(e:'…':)); in bash an array or function. Not modelled.
+				return i, true
+			}
+			if i+1 < n && s[i+1] == '(' {
+				return i, true // ((…)): arithmetic
+			}
+			parens++
+		case ')':
+			if parens == 0 {
+				if closer == ')' {
+					return i, false
+				}
+				return i, true // unbalanced
+			}
+			parens--
+		case '{':
+			if closer == '}' {
+				braces++
+			}
+		case '}':
+			if closer == '}' {
+				if braces == 0 && parens == 0 {
+					return i, false
+				}
+				if braces > 0 {
+					braces--
+				}
+			}
+		}
+		i++
+	}
+	if closer != 0 || parens != 0 {
+		return i, true // unterminated
+	}
+	return i, false
+}
+
+// scanDoubleQuoted scans a double-quoted string's contents from i (just past
+// the opening quote) and returns the index just past the closing quote.
+func scanDoubleQuoted(s string, i int) (int, bool) {
+	n := len(s)
+	for i < n {
+		switch s[i] {
+		case '\\':
+			i += 2
+			continue
+		case '"':
+			return i + 1, false
+		case '`':
+			return i, true
+		case '$':
+			if i+1 < n {
+				switch s[i+1] {
+				case '(':
+					if i+2 < n && s[i+2] == '(' {
+						return i, true // $((…)): arithmetic
+					}
+					// Command substitution parses a fresh context, even here.
+					j, bad := scanShell(s, i+2, ')')
+					if bad {
+						return i, true
+					}
+					i = j + 1
+					continue
+				case '{':
+					j, bad := scanParamRestricted(s, i+2)
+					if bad {
+						return i, true
+					}
+					i = j + 1
+					continue
+				}
+			}
+		}
+		i++
+	}
+	return i, true // unterminated
+}
+
+// scanParamRestricted scans a ${...} from i (just past "${") and returns the
+// index of its closing brace. Only plain forms pass — "${HOME}/x",
+// ${x:-default}, ${x#prefix}. Quoting inside it (whose treatment has varied
+// between bash versions, and differs inside double quotes), backslashes,
+// backticks, substitutions, subscripts (evaluated as arithmetic) and zsh
+// parameter flags are refused.
+func scanParamRestricted(s string, i int) (int, bool) {
+	depth := 0
+	for ; i < len(s); i++ {
+		switch s[i] {
+		case '\'', '"', '`', '\\', '[', '(':
+			// '(' also covers zsh parameter flags like ${(e)x}, which
+			// evaluate the value as code.
+			return i, true
+		case '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return i, false
+			}
+			depth--
+		}
+	}
+	return i, true
+}
+
+// isPlainSimpleCommand reports whether cmd is one simple command in which bash
+// expands and interprets nothing: plain words, '...' strings, and "..." strings
+// with no $, backtick, or backslash other than \" and \\. Outside quotes, no
+// $, backtick, backslash, newline, operator, redirect, parenthesis or comment.
+func isPlainSimpleCommand(cmd string) bool {
+	n := len(cmd)
+	for i := 0; i < n; i++ {
+		switch c := cmd[i]; c {
+		case '\'':
+			k := strings.IndexByte(cmd[i+1:], '\'')
+			if k < 0 {
+				return false
+			}
+			i += k + 1
+		case '"':
+			j := i + 1
+			for ; j < n && cmd[j] != '"'; j++ {
+				switch cmd[j] {
+				case '$', '`':
+					return false
+				case '\\':
+					if j+1 < n && (cmd[j+1] == '"' || cmd[j+1] == '\\') {
+						j++
+						continue
+					}
+					return false
+				}
+			}
+			if j >= n {
+				return false
+			}
+			i = j
+		case '$', '`', '\\', '\n', '\r', ';', '&', '|', '<', '>', '(', ')':
+			return false
+		case '#':
+			if atWordStart(cmd, i) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// skipANSICQuoted skips a $'...' string from i (just past "$'"): a backslash
+// escapes the next char, including a quote. Returns the index just past the
+// closing quote.
+func skipANSICQuoted(s string, i int) (int, bool) {
+	for i < len(s) {
+		switch s[i] {
+		case '\\':
+			i += 2
+			continue
+		case '\'':
+			return i + 1, true
+		}
+		i++
+	}
+	return i, false
+}
+
+// Shapes allowed in the first line of a chat-reply heredoc: plain words that no
+// shell expansion or quoting can touch, and a single-quoted delimiter.
+var (
+	chatReplyPlainWordRe  = regexp.MustCompile(`^[A-Za-z0-9_./:=@%+,-]+$`)
+	chatReplyHeredocOpRe  = regexp.MustCompile(`^<<'([A-Za-z0-9_]+)'$`)
+	chatReplyCommandNames = map[string]bool{"hearth": true, "hearth-dev": true, "hearth-local": true}
+)
+
+// isChatReplyHeredoc recognizes, in full, the one command an agent is taught
+// for posting a chat message (docs/agent-chat-message-transport.md):
+//
+//	hearth chat reply --room <id> [plain words…] <<'MARKER'
+//	…the message: any text at all…
+//	MARKER
+//
+// and nothing after it but whitespace. Only this exact shape lets the message
+// pass unscanned, because only here can nothing in it run: the first line is
+// plain words, the quoted marker makes bash read the body literally, the body
+// ends at the first line equal to the marker, and nothing follows. A message
+// that itself contains the marker line would end the heredoc early and bash
+// would run the rest — so that doesn't match, and gets an approval prompt.
+func isChatReplyHeredoc(cmd string) bool {
+	nl := strings.IndexByte(cmd, '\n')
+	if nl < 0 {
+		return false
+	}
+	head, rest := cmd[:nl], cmd[nl+1:]
+	// Blanks are exactly space and tab to bash; anything else is part of a word.
+	words := strings.FieldsFunc(head, func(r rune) bool { return r == ' ' || r == '\t' })
+	if len(words) < 4 {
+		return false
+	}
+	name := words[0]
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	if !chatReplyCommandNames[name] || words[1] != "chat" || words[2] != "reply" {
+		return false
+	}
+	m := chatReplyHeredocOpRe.FindStringSubmatch(words[len(words)-1])
+	if m == nil {
+		return false
+	}
+	for _, w := range words[:len(words)-1] {
+		if !chatReplyPlainWordRe.MatchString(w) {
+			return false
+		}
+	}
+	marker := m[1]
+	for pos := 0; ; {
+		lineEnd := strings.IndexByte(rest[pos:], '\n')
+		line, next := rest[pos:], len(rest)
+		if lineEnd >= 0 {
+			line, next = rest[pos:pos+lineEnd], pos+lineEnd+1
+		}
+		if line == marker {
+			return strings.Trim(rest[next:], " \t\n") == ""
+		}
+		if lineEnd < 0 {
+			return false // no terminator
+		}
+		pos = next
+	}
 }
 
 func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
@@ -257,7 +668,7 @@ func handleInterposeConn(conn net.Conn, agent string, ir *interposeRelay) {
 
 	// Auto-allow safe commands (read-only with no output redirects)
 	if toolName == "Bash" {
-		if cmd, ok := toolInput["command"].(string); ok && isSafeCommand(cmd) {
+		if cmd, ok := toolInput["command"].(string); ok && isSafeRequest(req, cmd) {
 			log.Printf("Interpose: auto-allow safe command: %s", cmd)
 			respond(conn, interposeResponse{Allow: true})
 			return
@@ -508,18 +919,35 @@ func unwrapEvalCommand(cmd string) string {
 		// Claude uses: eval 'cmd' \< /dev/null && pwd ...
 		// or: eval "cmd" \< /dev/null && pwd ...
 		endMarker := string(quote) + " \\< /dev/null"
-		if end := strings.Index(inner, endMarker); end >= 0 {
+		// The LAST occurrence is the wrapper's: a command that contains the
+		// marker text itself must not cut the extracted command short.
+		if end := strings.LastIndex(inner, endMarker); end >= 0 {
 			inner = inner[:end]
 		} else if end := strings.LastIndexByte(inner, quote); end >= 0 {
 			inner = inner[:end]
 		}
+		if quote == '\'' {
+			// Inside single quotes the only way to write ' is '\'' (close,
+			// escaped quote, reopen). Undo it, or a quoted heredoc delimiter
+			// or an apostrophe in a message scrambles quote tracking.
+			inner = unescapeSingleQuoted(inner)
+		} else {
+			// Unescape \" sequences
+			inner = strings.ReplaceAll(inner, "\\\"", "\"")
+		}
+	} else {
+		inner = strings.ReplaceAll(inner, "\\\"", "\"")
 	}
-	// Unescape \" sequences
-	inner = strings.ReplaceAll(inner, "\\\"", "\"")
 	if inner == "" {
 		return cmd
 	}
 	return inner
+}
+
+// unescapeSingleQuoted undoes the shell idiom for a single quote inside a
+// single-quoted string: close the quote, an escaped quote, reopen.
+func unescapeSingleQuoted(s string) string {
+	return strings.ReplaceAll(s, `'\''`, `'`)
 }
 
 // unwrapGeminiCommand extracts the actual command from Gemini's shell wrapper.
@@ -567,12 +995,12 @@ func unwrapCodexCommand(cmd string) string {
 		return cmd
 	}
 	inner := execLine[cIdx+5:] // skip " -c '"
-	// Find the closing quote — but the command may contain escaped quotes
-	// Codex uses '\'' to escape single quotes in single-quoted strings
-	// For display purposes, just trim the trailing quote
+	// Trim the closing quote, then undo Codex's '\'' escaping of single
+	// quotes inside the single-quoted command.
 	if len(inner) > 0 && inner[len(inner)-1] == '\'' {
 		inner = inner[:len(inner)-1]
 	}
+	inner = unescapeSingleQuoted(inner)
 	if inner == "" {
 		return cmd
 	}
