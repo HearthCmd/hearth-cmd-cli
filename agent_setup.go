@@ -180,6 +180,11 @@ func priorSessionUsable(agent, sessionID, cwd string) bool {
 // Claude stores trust per-project in ~/.claude.json under
 // projects.<abs-cwd>.hasTrustDialogAccepted. We read-modify-write that file,
 // preserving every other field.
+//
+// The same write also switches off Claude Code's startup check for the user's
+// closed Claude Code GitHub issues (see claudeClosedIssuesCheckOff). It's one
+// write on purpose: a fleet restart launches many agents on one account at
+// once, all editing this file.
 func preAcceptClaudeTrust(cwd string) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -208,10 +213,18 @@ func preAcceptClaudeTrust(cwd string) {
 		proj = map[string]any{}
 		projects[cwd] = proj
 	}
-	if proj["hasTrustDialogAccepted"] == true {
-		return // already trusted
+	changed := false
+	if proj["hasTrustDialogAccepted"] != true {
+		proj["hasTrustDialogAccepted"] = true
+		changed = true
 	}
-	proj["hasTrustDialogAccepted"] = true
+	if last, _ := root["closedIssuesLastChecked"].(float64); last < claudeClosedIssuesCheckOff {
+		root["closedIssuesLastChecked"] = claudeClosedIssuesCheckOff
+		changed = true
+	}
+	if !changed {
+		return
+	}
 
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
@@ -222,6 +235,20 @@ func preAcceptClaudeTrust(cwd string) {
 		log.Printf("preAcceptClaudeTrust: write %s failed: %v", path, err)
 	}
 }
+
+// claudeClosedIssuesCheckOff is written to ~/.claude.json's
+// closedIssuesLastChecked (milliseconds since the epoch; the year 3000).
+// Claude Code runs, at startup and at most once a day,
+//
+//	gh issue list -R anthropics/claude-code --author @me --state closed ...
+//
+// to tell the user their bug reports were fixed. For a Hearth agent that's
+// pure noise: nobody sees Claude Code's screen, the command would query GitHub
+// with whatever gh login the host has, and it isn't read-only-listed, so every
+// agent launched after a fleet restart asked a person to approve it. Claude
+// skips the check while now - closedIssuesLastChecked is under a day, so a
+// timestamp far in the future turns it off for good.
+const claudeClosedIssuesCheckOff = 32503680000000
 
 // preAcceptClaudeBypassPrompt pre-accepts claude 2.1.147+'s
 // "Bypass Permissions mode — by proceeding, you accept all

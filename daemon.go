@@ -114,6 +114,10 @@ type ipcRequest struct {
 	// the server place the reply where the agent was asked.
 	ChatThreadRootID string `json:"chat_thread_root_id,omitempty"`
 	ChatChannel      bool   `json:"chat_channel,omitempty"`
+	// ChatProgress marks a progress note (`hearth chat reply --progress`): a
+	// quick helper posts it and keeps working; only a reply without it is the
+	// helper's answer. Ignored for other agents.
+	ChatProgress bool `json:"chat_progress,omitempty"`
 
 	// Voice handoff fields — used by `hearth voice handoff` to transfer the
 	// calling agent's voice conversation to another household agent (V4).
@@ -1667,6 +1671,9 @@ func chatReplyPayload(req ipcRequest) map[string]interface{} {
 		p["thread_root_id"] = req.ChatThreadRootID
 	} else if req.ChatChannel {
 		p["channel"] = true
+	}
+	if req.ChatProgress {
+		p["progress"] = true
 	}
 	return p
 }

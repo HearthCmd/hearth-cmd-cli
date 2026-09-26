@@ -150,7 +150,7 @@ func TestStartDisplayPairing(t *testing.T) {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		gotFormFactor = body["form_factor"]
-		_, _ = w.Write([]byte(`{"code":"123456","serving_household":"MyHouse","serving_host":"scullery"}`))
+		_, _ = w.Write([]byte(`{"code":"123456","serving_household":"MyHouse","serving_host":"MyHost"}`))
 	}))
 	defer srv.Close()
 
@@ -161,8 +161,8 @@ func TestStartDisplayPairing(t *testing.T) {
 	if start.Code != "123456" {
 		t.Fatalf("code = %q, want 123456", start.Code)
 	}
-	if start.Household != "MyHouse" || start.Host != "scullery" {
-		t.Errorf("serving identity = %q / %q, want MyHouse / scullery", start.Household, start.Host)
+	if start.Household != "MyHouse" || start.Host != "MyHost" {
+		t.Errorf("serving identity = %q / %q, want MyHouse / MyHost", start.Household, start.Host)
 	}
 	if gotHostID != "host-1" {
 		t.Errorf("host_id query = %q, want host-1", gotHostID)

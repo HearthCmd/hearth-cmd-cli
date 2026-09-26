@@ -15,6 +15,14 @@ func TestChatReplyPayload(t *testing.T) {
 
 	// No flag: no thread field, so the relay places it where the agent was asked.
 	p := chatReplyPayload(base)
+	if _, ok := p["progress"]; ok {
+		t.Errorf("plain reply carried progress: %v", p)
+	}
+	withProgress := base
+	withProgress.ChatProgress = true
+	if pp := chatReplyPayload(withProgress); pp["progress"] != true {
+		t.Errorf("--progress payload = %v", pp)
+	}
 	if _, ok := p["thread_root_id"]; ok {
 		t.Errorf("plain reply carried thread_root_id: %v", p)
 	}

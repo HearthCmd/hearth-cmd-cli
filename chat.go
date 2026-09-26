@@ -30,7 +30,9 @@ func runChat(args []string) {
 	}
 }
 
-const chatReplyUsage = `usage: hearth chat reply --room <room_id> [--thread <message_id> | --channel] ["<message>"]
+const chatReplyUsage = `usage: hearth chat reply --room <room_id> [--thread <message_id> | --channel] [--progress] ["<message>"]
+  --progress marks a progress note or question rather than your answer (a quick
+  helper keeps working after posting one).
   With no message argument, the message is read from stdin. Prefer a quoted heredoc,
   which passes any text through untouched (no quoting, no $ or backtick expansion):
     hearth chat reply --room <room_id> <<'HEARTH_MSG'
@@ -38,10 +40,13 @@ const chatReplyUsage = `usage: hearth chat reply --room <room_id> [--thread <mes
     HEARTH_MSG`
 
 // daemonCapabilities is what this daemon advertises to the relay on dial (the
-// `caps` query param). chat_reply_stdin: `hearth chat reply` reads the message
-// from stdin, so the relay may teach agents here the heredoc form
-// (docs/agent-chat-message-transport.md).
-const daemonCapabilities = "chat_reply_stdin"
+// `caps` query param), comma-separated.
+//   - chat_reply_stdin: `hearth chat reply` reads the message from stdin, so the
+//     relay may teach agents here the heredoc form
+//     (docs/agent-chat-message-transport.md).
+//   - chat_reply_progress: `hearth chat reply --progress` exists, so a quick
+//     helper here may post progress notes before its answer.
+const daemonCapabilities = "chat_reply_stdin,chat_reply_progress"
 
 // chatReplyMaxBytes caps a message read from stdin. Far above any chat
 // message; it only stops a runaway pipe.
@@ -65,6 +70,7 @@ func runChatReply(args []string) {
 	room := fs.String("room", os.Getenv("HEARTH_CHAT_ROOM_ID"), "Chat room ID (or set HEARTH_CHAT_ROOM_ID)")
 	thread := fs.String("thread", "", "Reply in this thread (the id of any message in it)")
 	channel := fs.Bool("channel", false, "Post in the main room, not a thread")
+	progress := fs.Bool("progress", false, "A progress note or question, not your answer (a quick helper keeps working)")
 	_ = fs.Parse(args)
 
 	if *thread != "" && *channel {
@@ -95,6 +101,7 @@ func runChatReply(args []string) {
 		ChatText:            text,
 		ChatThreadRootID:    *thread,
 		ChatChannel:         *channel,
+		ChatProgress:        *progress,
 	}
 	resp, err := sendChatReplyIPC(req)
 	if err != nil {

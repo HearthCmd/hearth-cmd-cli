@@ -456,6 +456,9 @@ func (d *DaemonWS) routeControlFrame(data []byte) {
 			} else {
 				log.Printf("daemon-ws: destroyed agent instance %s, removed %s", msg.AIAgentInstanceID, path)
 			}
+			// …and what Claude Code kept about that directory outside it: its
+			// transcripts, prompt history and settings entry.
+			eraseClaudeSessionState(path)
 		} else {
 			log.Printf("daemon-ws: destroy_agent_instance %s: missing/invalid working_dir %q; skipping rm", msg.AIAgentInstanceID, path)
 		}
