@@ -111,6 +111,16 @@ type DaemonWS struct {
 	// displayServer.handleRelayFrame; nil on pure agent hosts. This is how the
 	// unified daemon drives screens over its single /ws/daemon connection.
 	displayFrameFunc func([]byte) bool
+
+	// displayDeliverMu serializes display-frame delivery with setDisplayFrameFunc,
+	// so a held-over display_screens set can't be applied after a newer one.
+	// pendingDisplayScreens (guarded by it) is the latest display_screens frame
+	// that arrived before the display subsystem attached. The relay sends that
+	// set the moment the daemon connects, which is before the daemon starts its
+	// display subsystem; dropping it left the display server with no screens,
+	// so it turned away every paired browser after a restart.
+	displayDeliverMu      sync.Mutex
+	pendingDisplayScreens []byte
 }
 
 // agentWS is a per-agent-instance handle to the shared daemon WebSocket.
@@ -222,10 +232,40 @@ func (d *DaemonWS) SendText(data []byte) {
 // setDisplayFrameFunc wires the display subsystem's frame handler so relay→host
 // display_publish / display_clear frames reach it. Set once when a role-display
 // daemon activates the display subsystem.
+//
+// A display_screens set that arrived before this is handed over now, so the
+// display server starts with the screens it serves rather than waiting for the
+// next push.
 func (d *DaemonWS) setDisplayFrameFunc(fn func([]byte) bool) {
+	d.displayDeliverMu.Lock()
+	defer d.displayDeliverMu.Unlock()
 	d.mu.Lock()
 	d.displayFrameFunc = fn
 	d.mu.Unlock()
+	pending := d.pendingDisplayScreens
+	d.pendingDisplayScreens = nil
+	if fn != nil && pending != nil {
+		fn(pending)
+	}
+}
+
+// deliverDisplayFrame hands a relay frame to the display subsystem. Before one is
+// attached, a display_screens set is held (latest wins) for setDisplayFrameFunc
+// and counts as consumed; every other frame falls through unconsumed.
+func (d *DaemonWS) deliverDisplayFrame(msgType string, data []byte) bool {
+	d.displayDeliverMu.Lock()
+	defer d.displayDeliverMu.Unlock()
+	d.mu.RLock()
+	fn := d.displayFrameFunc
+	d.mu.RUnlock()
+	if fn != nil {
+		return fn(data)
+	}
+	if msgType == "display_screens" {
+		d.pendingDisplayScreens = append([]byte(nil), data...)
+		return true
+	}
+	return false
 }
 
 // RegisterAgentInstance creates a per-instance handle for the given ID.
@@ -544,13 +584,11 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		return false
 	}
 
-	// Display frames (relay→host publish/clear) carry no ai_agent_instance_id and
-	// are routed to the display subsystem on a role-display daemon. handleRelayFrame
-	// only consumes display_publish/display_clear, so this is inert on agent hosts.
-	d.mu.RLock()
-	displayFn := d.displayFrameFunc
-	d.mu.RUnlock()
-	if displayFn != nil && displayFn(data) {
+	// Display frames (relay→host publish/clear/scroll/screens) carry no
+	// ai_agent_instance_id and are routed to the display subsystem on a
+	// role-display daemon. On an agent host only display_screens is consumed (held,
+	// unused — the relay sends every host the set on connect); the rest fall through.
+	if d.deliverDisplayFrame(msg.Type, data) {
 		return true
 	}
 

@@ -137,8 +137,15 @@ type displayServer struct {
 	// known is the relay-pushed set of screens bound to THIS host (display_screens
 	// frame, §B3): screen io_device_id → its credential/metadata. /ws/screen viewers
 	// are validated against it locally (no per-connect relay round trip); a screen
-	// dropping out (revoked) evicts its live sockets. nil until the first push.
+	// dropping out (revoked) evicts its live sockets. Empty until the first push.
 	known map[string]screenCred
+	// screensLoaded is set by the first display_screens push since this process
+	// started. Until then an empty `known` means "haven't heard from the relay",
+	// not "no screens": /ws/screen answers try-again-later instead of rejecting,
+	// so a paired browser that reconnects right after a restart keeps its
+	// credential, and display_state reports screens_loaded=false so the relay
+	// sends the set again.
+	screensLoaded bool
 	// screenPairLimiter throttles /screen/pair per LAN client (§B7) so a peer can't
 	// burn the host's shared relay /pair/start budget. The pairing is otherwise
 	// stateless — the browser mints + holds its own secret; this server holds nothing.
@@ -433,6 +440,16 @@ func (d *displayServer) handleScreenWS(w http.ResponseWriter, r *http.Request) {
 	// IP:8090 gets the kiosk's pair page, never content.
 	if credScreenID == "" {
 		conn.Close(websocket.StatusPolicyViolation, "screen credential required")
+		return
+	}
+	// Until the relay has sent this host its screen set (display_screens), a
+	// credential can't be judged: the set is empty because we haven't heard, not
+	// because the screen was revoked. Answer try-again-later (1013), never 1008 —
+	// the kiosk erases its credential on 1008, so a browser that reconnects in the
+	// seconds after a host restart would otherwise throw away a valid pairing.
+	// Nothing is served before the relay speaks, so this admits no one.
+	if !d.screensReady() {
+		conn.Close(websocket.StatusTryAgainLater, "screens not loaded yet")
 		return
 	}
 	if !d.validScreenCredential(credScreenID, credSecret) {

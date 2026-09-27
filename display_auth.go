@@ -56,6 +56,7 @@ func (d *displayServer) applyDisplayScreens(screens []displayScreenInfo) {
 	d.mu.Lock()
 	prev := d.known
 	d.known = next
+	d.screensLoaded = true
 	d.mu.Unlock()
 
 	// Evict screens present before but gone now.
@@ -81,6 +82,15 @@ func (d *displayServer) validScreenCredential(screenID, secret string) bool {
 		return false
 	}
 	return sha256Hex([]byte(secret)) == cred.SecretHash
+}
+
+// screensReady reports whether the relay has told this server which screens are
+// bound to it since it started. Before that, no credential can be judged either
+// way — see displayServer.screensLoaded.
+func (d *displayServer) screensReady() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.screensLoaded
 }
 
 // knownScreen returns the metadata for a bound screen id, if the relay has reported

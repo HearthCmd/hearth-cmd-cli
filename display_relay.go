@@ -102,6 +102,7 @@ func (d *displayServer) displayStateReport() map[string]interface{} {
 	for id := range d.known {
 		ids = append(ids, id)
 	}
+	loaded := d.screensLoaded
 	d.mu.Unlock()
 
 	screens := make([]map[string]interface{}, 0, len(ids))
@@ -124,7 +125,10 @@ func (d *displayServer) displayStateReport() map[string]interface{} {
 		}
 		screens = append(screens, entry)
 	}
-	data := map[string]interface{}{"screens": screens}
+	// screens_loaded=false asks the relay to send the screen set again: without it
+	// this host can't let any paired browser in. It is sent on every report until
+	// the set arrives, so a lost or dropped push heals within one heartbeat.
+	data := map[string]interface{}{"screens": screens, "screens_loaded": loaded}
 	// Host-level pairing endpoint: which LAN URL(s) to open in a browser to pair a new
 	// screen with this household. Computed once at serve time (d.bindAddr/pairingURLs),
 	// so this stays a pure function of the struct — reported even with zero screens so a

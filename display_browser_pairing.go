@@ -71,9 +71,12 @@ func clientIPForPair(r *http.Request) string {
 }
 
 // handleScreenPair (POST /screen/pair) starts a host-authed pairing for a browser-
-// minted screen. Body: {io_device_id, secret, is_temp}. The browser holds the secret;
-// we hash it for the relay and never store it (the secret already crosses the LAN on
-// every /ws/screen handshake, so receiving it here is no new exposure). Response:
+// minted screen. Body: {io_device_id, secret, is_temp, prior_screen_id?,
+// prior_secret?}. The browser holds the secret; we hash it for the relay and never
+// store it (the secret already crosses the LAN on every /ws/screen handshake, so
+// receiving it here is no new exposure). The optional prior pair is the screen the
+// browser was until this server refused it; it is hashed and forwarded the same way,
+// and the relay only trusts it if the hash matches a live screen at claim. Response:
 // {code} (or {error}). Unauthenticated by design — the phone's claim is the boundary.
 func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -85,9 +88,11 @@ func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		IODeviceID string `json:"io_device_id"`
-		Secret     string `json:"secret"`
-		IsTemp     bool   `json:"is_temp"`
+		IODeviceID    string `json:"io_device_id"`
+		Secret        string `json:"secret"`
+		IsTemp        bool   `json:"is_temp"`
+		PriorScreenID string `json:"prior_screen_id"`
+		PriorSecret   string `json:"prior_secret"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil ||
 		body.IODeviceID == "" || body.Secret == "" {
@@ -106,7 +111,11 @@ func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request)
 		writeScreenJSON(w, map[string]interface{}{"error": "display server not enrolled"})
 		return
 	}
-	start, err := startDisplayPairing(baseURL, hostID, hostSecret, body.IODeviceID, sha256Hex([]byte(body.Secret)), body.IsTemp)
+	var prior *priorScreen
+	if body.PriorScreenID != "" && body.PriorSecret != "" {
+		prior = &priorScreen{ID: body.PriorScreenID, SecretHash: sha256Hex([]byte(body.PriorSecret))}
+	}
+	start, err := startDisplayPairing(baseURL, hostID, hostSecret, body.IODeviceID, sha256Hex([]byte(body.Secret)), body.IsTemp, prior)
 	if err != nil {
 		writeScreenJSON(w, map[string]interface{}{"error": "pairing start failed"})
 		return
@@ -133,7 +142,9 @@ func (d *displayServer) handleScreenPair(w http.ResponseWriter, r *http.Request)
 // handleScreenPairPoll (GET /screen/pair/poll?screen_id=&code=) forwards the relay
 // poll and returns its status. Stateless — the browser holds its credential and re-
 // starts on not_found; on claimed it connects /ws/screen (the relay's display_screens
-// push has already taught this server the screen's secret_hash).
+// push has already taught this server the screen's secret_hash). A claim that
+// re-paired into an existing screen also returns that screen's id (io_device_id,
+// reclaimed=true), which the browser must connect as.
 func (d *displayServer) handleScreenPairPoll(w http.ResponseWriter, r *http.Request) {
 	screenID := r.URL.Query().Get("screen_id")
 	code := r.URL.Query().Get("code")
@@ -146,12 +157,17 @@ func (d *displayServer) handleScreenPairPoll(w http.ResponseWriter, r *http.Requ
 		writeScreenJSON(w, map[string]interface{}{"status": "pending"})
 		return
 	}
-	status, err := pollDisplayPairing(baseURL, screenID, code)
+	poll, err := pollDisplayPairing(baseURL, screenID, code)
 	if err != nil {
 		writeScreenJSON(w, map[string]interface{}{"status": "pending"})
 		return
 	}
-	writeScreenJSON(w, map[string]interface{}{"status": status})
+	resp := map[string]interface{}{"status": poll.Status}
+	if poll.Status == "claimed" && poll.Reclaimed && poll.IODeviceID != "" {
+		resp["io_device_id"] = poll.IODeviceID
+		resp["reclaimed"] = true
+	}
+	writeScreenJSON(w, resp)
 }
 
 func writeScreenJSON(w http.ResponseWriter, v interface{}) {

@@ -36,13 +36,26 @@ type displayPairingStart struct {
 	Host      string
 }
 
-func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string, isTemp bool) (displayPairingStart, error) {
+// priorScreen, when set, is the screen this browser was until the display server
+// refused its credential (id + hash of that screen's secret). The relay checks it at
+// claim and, if it proves the browser was a live screen, re-pairs into that screen
+// so it keeps its rules.
+type priorScreen struct {
+	ID         string
+	SecretHash string
+}
+
+func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash string, isTemp bool, prior *priorScreen) (displayPairingStart, error) {
 	payload := map[string]interface{}{
 		"io_device_id": screenID,
 		"form_factor":  "display",
 		"device_name":  "Display",
 		"secret_hash":  secretHash,
 		"is_temp":      isTemp,
+	}
+	if prior != nil {
+		payload["prior_screen_id"] = prior.ID
+		payload["prior_secret_hash"] = prior.SecretHash
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", baseURL+"/pair/start?host_id="+url.QueryEscape(hostID), bytes.NewReader(body))
@@ -75,33 +88,40 @@ func startDisplayPairing(baseURL, hostID, hostSecret, screenID, secretHash strin
 	return displayPairingStart{Code: r.Code, Household: r.ServingHousehold, Host: r.ServingHost}, nil
 }
 
-// pollDisplayPairing POSTs /pair/poll and returns the pairing status
-// ("pending" | "claimed" | "not_found").
-func pollDisplayPairing(baseURL, screenID, code string) (string, error) {
+// displayPairingPoll is the relay's /pair/poll result. On a claim that re-paired
+// into an existing screen, IODeviceID is that screen's id and Reclaimed is true:
+// the browser must adopt the id, because the relay rotated that screen's secret to
+// the browser's and never created a screen under the browser's own id.
+type displayPairingPoll struct {
+	Status     string `json:"status"` // "pending" | "claimed" | "not_found"
+	IODeviceID string `json:"io_device_id"`
+	Reclaimed  bool   `json:"reclaimed"`
+}
+
+// pollDisplayPairing POSTs /pair/poll and returns the pairing status.
+func pollDisplayPairing(baseURL, screenID, code string) (displayPairingPoll, error) {
 	payload := map[string]string{"io_device_id": screenID, "code": code}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest("POST", baseURL+"/pair/poll", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return displayPairingPoll{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	addClientHeader(req)
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
-		return "", err
+		return displayPairingPoll{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("pair/poll HTTP %d", resp.StatusCode)
+		return displayPairingPoll{}, fmt.Errorf("pair/poll HTTP %d", resp.StatusCode)
 	}
-	var r struct {
-		Status string `json:"status"`
-	}
+	var r displayPairingPoll
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", err
+		return displayPairingPoll{}, err
 	}
-	return r.Status, nil
+	return r, nil
 }
 
 // Screens pair themselves now (browser-as-screen, §B4): each kiosk browser claims

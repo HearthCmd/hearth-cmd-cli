@@ -48,7 +48,10 @@ const chatReplyUsage = `usage: hearth chat reply --room <room_id> [--thread <mes
 //     helper here may post progress notes before its answer.
 //   - household_teardown: when the household is deleted, this daemon cleans
 //     up its folders and signs out (household_teardown.go).
-const daemonCapabilities = "chat_reply_stdin,chat_reply_progress,household_teardown"
+//   - screen_reclaim: the display server passes a re-paired screen's id back to
+//     its browser (handleScreenPairPoll), so the relay may re-pair a browser into
+//     an existing screen.
+const daemonCapabilities = "chat_reply_stdin,chat_reply_progress,household_teardown,screen_reclaim"
 
 // chatReplyMaxBytes caps a message read from stdin. Far above any chat
 // message; it only stops a runaway pipe.

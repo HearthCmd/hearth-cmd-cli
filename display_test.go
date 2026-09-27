@@ -154,7 +154,7 @@ func TestStartDisplayPairing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	start, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef", false)
+	start, err := startDisplayPairing(srv.URL, "host-1", "hsec", "screen-1", "deadbeef", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

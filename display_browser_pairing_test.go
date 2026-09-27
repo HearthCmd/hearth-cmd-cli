@@ -206,3 +206,75 @@ func TestScreenPair_StatelessForward(t *testing.T) {
 		t.Fatal("stateless pairing must not self-add to known")
 	}
 }
+
+// A browser the display server refused pairs again carrying the screen it was: the
+// forward sends that id plus the HASH of its old secret (never the secret), and a
+// claim that re-paired into an existing screen comes back with that screen's id,
+// which the browser must adopt. Before, the poll forward dropped it, so a re-paired
+// browser connected under its own new id and was refused.
+func TestScreenPair_ForwardsPriorScreenAndReclaimedID(t *testing.T) {
+	var gotStart map[string]interface{}
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/pair/start":
+			gotStart = map[string]interface{}{}
+			_ = json.NewDecoder(r.Body).Decode(&gotStart)
+			_, _ = w.Write([]byte(`{"code":"424242"}`))
+		case "/pair/poll":
+			_, _ = w.Write([]byte(`{"status":"claimed","io_device_id":"kitchen","reclaimed":true,"organization_id":"org-1"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+
+	oldWS := wsURL
+	wsURL = "ws" + strings.TrimPrefix(relay.URL, "http") + "/ws/relay"
+	defer func() { wsURL = oldWS }()
+	withFakeHome(t)
+	if err := writeConfigValue("host_id", "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfigValue("host_secret", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	d := newDisplayServer()
+
+	pair := func(body string) {
+		t.Helper()
+		pw := httptest.NewRecorder()
+		d.handleScreenPair(pw, httptest.NewRequest("POST", "/screen/pair", strings.NewReader(body)))
+		if !strings.Contains(pw.Body.String(), "424242") {
+			t.Fatalf("pair resp = %s", pw.Body.String())
+		}
+	}
+
+	pair(`{"io_device_id":"fresh","secret":"new","prior_screen_id":"kitchen","prior_secret":"old"}`)
+	if gotStart["prior_screen_id"] != "kitchen" || gotStart["prior_secret_hash"] != sha256Hex([]byte("old")) {
+		t.Fatalf("pair/start prior = %v / %v, want kitchen / sha256(old)", gotStart["prior_screen_id"], gotStart["prior_secret_hash"])
+	}
+	for k, v := range gotStart {
+		if v == "old" {
+			t.Fatalf("the old secret itself reached the relay under %q", k)
+		}
+	}
+
+	pair(`{"io_device_id":"fresh","secret":"new"}`)
+	if _, ok := gotStart["prior_screen_id"]; ok {
+		t.Fatal("no prior screen given: none should be forwarded")
+	}
+
+	qw := httptest.NewRecorder()
+	d.handleScreenPairPoll(qw, httptest.NewRequest("GET", "/screen/pair/poll?screen_id=fresh&code=424242", nil))
+	var poll map[string]interface{}
+	if err := json.Unmarshal(qw.Body.Bytes(), &poll); err != nil {
+		t.Fatal(err)
+	}
+	if poll["status"] != "claimed" || poll["io_device_id"] != "kitchen" || poll["reclaimed"] != true {
+		t.Fatalf("poll = %v, want claimed + reclaimed kitchen", poll)
+	}
+	if _, leaked := poll["organization_id"]; leaked {
+		t.Fatal("the poll forward should pass only what the kiosk needs")
+	}
+}

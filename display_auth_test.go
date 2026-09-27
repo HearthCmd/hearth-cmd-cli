@@ -134,6 +134,68 @@ func TestScreenWS_RejectsUncredentialed(t *testing.T) {
 	}
 }
 
+// Until the relay has sent this host its screen set, a credential can't be judged:
+// /ws/screen answers try-again-later (1013), never policy-violation (1008), which
+// the kiosk takes as "revoked" and erases its credential over. Once the set has
+// arrived, an unknown screen is rejected as before, including when the set is empty.
+func TestScreenWS_TryAgainLaterUntilScreensLoaded(t *testing.T) {
+	d := newDisplayServer()
+	srv := httptest.NewServer(http.HandlerFunc(d.handleScreenWS))
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+
+	closeStatus := func(secret string) websocket.StatusCode {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+			Subprotocols: []string{screenSubprotocol, "kitchen", secret},
+		})
+		if err != nil {
+			t.Fatalf("handshake should complete: %v", err)
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		_, _, rerr := conn.Read(ctx)
+		if rerr == nil {
+			return -1 // got an assignment: admitted
+		}
+		return websocket.CloseStatus(rerr)
+	}
+
+	if got := closeStatus("sek"); got != websocket.StatusTryAgainLater {
+		t.Fatalf("before the screen set arrives: want 1013, got %v", got)
+	}
+
+	d.applyDisplayScreens(nil) // loaded, and this host serves no screens
+	if got := closeStatus("sek"); got != websocket.StatusPolicyViolation {
+		t.Fatalf("after an empty set: want 1008, got %v", got)
+	}
+
+	d.applyDisplayScreens([]displayScreenInfo{{ScreenID: "kitchen", SecretHash: sha256Hex([]byte("sek"))}})
+	if got := closeStatus("sek"); got != -1 {
+		t.Fatalf("a bound screen should be admitted, got close %v", got)
+	}
+	if got := closeStatus("wrong"); got != websocket.StatusPolicyViolation {
+		t.Fatalf("a wrong secret after load: want 1008, got %v", got)
+	}
+}
+
+// display_state carries screens_loaded so the relay re-sends the screen set to a
+// host that doesn't have one; it flips on the first push, even an empty one.
+func TestDisplayStateReport_ScreensLoaded(t *testing.T) {
+	d := newDisplayServer()
+	loaded := func() interface{} {
+		return d.displayStateReport()["data"].(map[string]interface{})["screens_loaded"]
+	}
+	if got := loaded(); got != false {
+		t.Fatalf("before any push: screens_loaded = %v, want false", got)
+	}
+	d.applyDisplayScreens(nil)
+	if got := loaded(); got != true {
+		t.Fatalf("after a push: screens_loaded = %v, want true", got)
+	}
+}
+
 func assertClosed(t *testing.T, ch chan struct{}, what string) {
 	t.Helper()
 	select {

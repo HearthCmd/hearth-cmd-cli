@@ -43,3 +43,39 @@ func TestDaemonWSDisplayFrameRouting(t *testing.T) {
 		t.Fatalf("routed frame should have applied: current = %+v", got)
 	}
 }
+
+// The relay sends display_screens the moment the daemon connects, before the
+// daemon has started its display subsystem. That set must be held and handed
+// over when the subsystem attaches (latest wins), or the display server starts
+// with no screens and turns every paired browser away after a restart.
+func TestDaemonWSHoldsDisplayScreensUntilAttached(t *testing.T) {
+	d := NewDaemonWS("ws://example/ws/daemon", "secret")
+	older := []byte(`{"type":"display_screens","screens":[{"screen_id":"old","secret_hash":"h0"}]}`)
+	newer := []byte(`{"type":"display_screens","screens":[{"screen_id":"kitchen","secret_hash":"h1"}]}`)
+	if !d.handleTextFrame(older) || !d.handleTextFrame(newer) {
+		t.Fatal("display_screens before attach should be held (consumed)")
+	}
+
+	ds := newDisplayServer()
+	if ds.screensReady() {
+		t.Fatal("a fresh display server has not heard from the relay")
+	}
+	d.setDisplayFrameFunc(ds.handleRelayFrame)
+	if !ds.screensReady() {
+		t.Fatal("the held display_screens set should apply on attach")
+	}
+	if _, ok := ds.knownScreen("kitchen"); !ok {
+		t.Fatal("the latest held set should apply")
+	}
+	if _, ok := ds.knownScreen("old"); ok {
+		t.Fatal("an older held set must not win over the latest")
+	}
+
+	// Handed over once: attaching again must not replay it over newer state.
+	d.setDisplayFrameFunc(ds.handleRelayFrame)
+	d.handleTextFrame([]byte(`{"type":"display_screens","screens":[]}`))
+	d.setDisplayFrameFunc(ds.handleRelayFrame)
+	if _, ok := ds.knownScreen("kitchen"); ok {
+		t.Fatal("a held set was replayed after a newer push")
+	}
+}
