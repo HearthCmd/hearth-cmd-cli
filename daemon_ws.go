@@ -71,6 +71,11 @@ type DaemonWS struct {
 	organizationsFunc func(orgs []daemonOrgEntry)
 	agentHomePathFunc func(dir string)
 
+	// householdTeardownFunc handles household_teardown: the relay is about to
+	// delete this host's household and asks it to clean up first. Wired to
+	// Daemon.handleHouseholdTeardown (household_teardown.go).
+	householdTeardownFunc func(data []byte)
+
 	// afterReconnectFunc, when set, runs after the post-reconnect
 	// agent re-registration. Lets the owning Daemon hook additional
 	// reconnect-time work (2a re-reports plugin installs here) without
@@ -575,6 +580,11 @@ func (d *DaemonWS) handleTextFrame(data []byte) bool {
 		}
 		if json.Unmarshal(data, &ahd) == nil && d.agentHomePathFunc != nil {
 			d.agentHomePathFunc(ahd.AgentHomePath)
+		}
+		return true
+	case "household_teardown":
+		if d.householdTeardownFunc != nil {
+			d.householdTeardownFunc(data)
 		}
 		return true
 	case "resource_connections_changed":

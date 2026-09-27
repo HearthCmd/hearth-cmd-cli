@@ -613,7 +613,7 @@ Run 'hearth hh <entity> --help' for details.
 
 func runOrganizationOrg(args []string) {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintf(os.Stderr, "Usage: hearth hh household <list|get|create|update|delete>\n")
+		fmt.Fprintf(os.Stderr, "Usage: hearth hh household <list|get|create|update>\n")
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -667,20 +667,11 @@ func runOrganizationOrg(args []string) {
 			os.Exit(1)
 		}
 		printJSON(data)
-	case "archive":
-		fs := flag.NewFlagSet("org archive", flag.ExitOnError)
-		id := fs.String("id", "", "Household ID")
-		fs.Parse(args[1:])
-		if *id == "" {
-			fmt.Fprintf(os.Stderr, "hearth: --id required\n")
-			os.Exit(1)
-		}
-		data, err := sendWSRequest("archive_organization", map[string]interface{}{"id": *id})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "hearth: %v\n", err)
-			os.Exit(1)
-		}
-		printJSON(data)
+	case "archive", "delete":
+		// Deleting a household is permanent and belongs to the app, where the
+		// owner sees exactly what goes and confirms with an email code.
+		fmt.Fprintf(os.Stderr, "hearth: households are deleted from the Hearth app (Household → Delete household).\n")
+		os.Exit(1)
 	default:
 		fmt.Fprintf(os.Stderr, "hearth hh household: unknown command %q\n", args[0])
 		os.Exit(1)

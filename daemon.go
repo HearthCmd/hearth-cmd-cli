@@ -1305,6 +1305,7 @@ func (d *Daemon) startDaemonWS() {
 	d.daemonWS.accountFunc = d.SetAccount
 	d.daemonWS.organizationsFunc = d.SetOrganizations
 	d.daemonWS.agentHomePathFunc = d.SetAgentHomePath
+	d.daemonWS.householdTeardownFunc = d.handleHouseholdTeardown
 
 	// resource-plugin substrate (1e/1f) needs daemonWS to be set
 	// before it's useful. Wire the authz preflight transport here.
@@ -2310,7 +2311,7 @@ var gatedHouseholdCRUD = map[string]bool{
 	"create_working_directory": true, "find_or_create_working_directory": true, "update_working_directory": true, "abandon_working_directory": true,
 	"create_ai_brain_model": true, "update_ai_brain_model": true, "archive_ai_brain_model": true,
 	"create_agent_job_description": true, "update_agent_job_description": true, "archive_agent_job_description": true,
-	"update_organization": true, "archive_organization": true,
+	"update_organization": true,
 	"add_organization_member": true, "remove_organization_member": true,
 	// acquire (CP2) blocks server-side on a human approval, like a gated CRUD.
 	"acquire": true,

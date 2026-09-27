@@ -46,7 +46,9 @@ const chatReplyUsage = `usage: hearth chat reply --room <room_id> [--thread <mes
 //     (docs/agent-chat-message-transport.md).
 //   - chat_reply_progress: `hearth chat reply --progress` exists, so a quick
 //     helper here may post progress notes before its answer.
-const daemonCapabilities = "chat_reply_stdin,chat_reply_progress"
+//   - household_teardown: when the household is deleted, this daemon cleans
+//     up its folders and signs out (household_teardown.go).
+const daemonCapabilities = "chat_reply_stdin,chat_reply_progress,household_teardown"
 
 // chatReplyMaxBytes caps a message read from stdin. Far above any chat
 // message; it only stops a runaway pipe.
